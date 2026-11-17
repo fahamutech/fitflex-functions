@@ -18,7 +18,7 @@ let setup = false;
 
 async function seed(status = 'cancelled', id = reqId) {
   if (!setup) { await db('User').insert({ id: memberId, userType: 'member', displayName: 'Held Member', updatedAt: new Date() }); setup = true; }
-  await db('PaymentRequest').insert({ id, memberId, subscriptionId: null, tier: 'T1', amountTzs: 50000, status, provider: 'tunzaa', requestedAt: new Date() });
+  await db('PaymentRequest').insert({ id, memberId, subscriptionId: null, tier: 'T1', amountTzs: 50000, status, provider: 'azampay', requestedAt: new Date() });
   await db('AuditLog').insert({ id: randomUUID(), action: 'payment_mobile_money_orphaned', target: id, actor: 'system:mobile-money', before: { status }, after: { transactionId: `TX-${id}`, amountTzs: 50000 } });
 }
 

@@ -9,7 +9,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { activationDates } from '../src/shared/subscription-status.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
-import { createWebhookService } from '../src/services/webhook-service.mjs';
 import { createNotificationService } from '../src/services/notification-service.mjs';
 import { createOwnerGymService } from '../src/services/owner-gym-service.mjs';
 import { createGymService } from '../src/services/gym-service.mjs';
@@ -55,13 +54,13 @@ test('a plan\'s period starts when it is paid for and keeps its length', () => {
   assert.deepEqual(activationDates({ ...sub, status: 'active' }, paidAt), {}, 'an active plan keeps its dates');
 });
 
-test('approving a Pass payment, or a Selcom confirmation, starts the 30 days then', async () => {
+test('approving a Pass payment, or AzamPay confirming it, starts the 30 days then', async () => {
   const requested = new Date(Date.now() - 2 * DAY);
   const pending = id => ({ id, memberId: 'm1', type: 'platform_pass', tier: 'pro', status: 'payment_pending',
     startedAt: requested.toISOString(), cycleStartedAt: requested.toISOString(),
     renewsAt: new Date(+requested + 30 * DAY).toISOString(), expiresAt: new Date(+requested + 30 * DAY).toISOString() });
   const subscriptions = memStore([pending('sub_a'), pending('sub_b')]);
-  const paymentRequests = memStore([{ id: 'pay_a', memberId: 'm1', subscriptionId: 'sub_a', status: 'pending', amountTzs: 150000 }]);
+  const paymentRequests = memStore([{ id: 'pay_a', memberId: 'm1', subscriptionId: 'sub_a', status: 'pending', amountTzs: 150000 }, { id: 'pay_b', memberId: 'm1', subscriptionId: 'sub_b', status: 'pending', amountTzs: 150000 }]);
 
   const admin = createAdminPaymentService({ paymentRequests, subscriptions, users: memStore(), auditLog: audit });
   await admin.decide({ id: 'pay_a', decision: 'approve', actorId: 'adm' });
@@ -70,8 +69,8 @@ test('approving a Pass payment, or a Selcom confirmation, starts the 30 days the
   assert.ok(Date.now() - +new Date(a.startedAt) < 60_000, 'starts at approval');
   assert.equal(+new Date(a.expiresAt) - +new Date(a.startedAt), 30 * DAY);
 
-  const webhook = createWebhookService({ subscriptions, webhookSeen: memStore() });
-  await webhook.handleSelcom({ payment_id: 'sel_1', status: 'success', subscription_id: 'sub_b' });
+  // AzamPay's verified callback settles a request through the same approval (actor azampay; see mobile-money-service).
+  await admin.decide({ id: 'pay_b', decision: 'approve', reference: 'TXN_1', actorId: 'azampay', amountTzs: 150000, automated: true });
   const b = await subscriptions.findByIdAsync('sub_b');
   assert.equal(b.status, 'active');
   assert.ok(Date.now() - +new Date(b.startedAt) < 60_000);

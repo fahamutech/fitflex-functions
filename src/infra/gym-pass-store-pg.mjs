@@ -5,6 +5,7 @@
 // Child subscriptions are written here, in the same transaction as the beneficiary they belong to: each covered
 // person gets their OWN `direct_sub` row (same expiresAt as the sale, no PaymentRequest of its own).
 import { randomUUID } from 'node:crypto';
+import { pendingMobileMoneyInFlight } from '../shared/mobile-money-claim.mjs';
 import { SLOT_HOLDING, effectivePurchaseStatus, passExpiry } from '../shared/gym-pass-rules.mjs';
 
 const plain = (row) => (row ? JSON.parse(JSON.stringify(row, (_, v) => (typeof v === 'bigint' ? Number(v) : v))) : null);
@@ -59,7 +60,6 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
       if (err?.code === UNIQUE_VIOLATION) {
         const c = constraintOf(err);
         if (/gympasspurchase_open_unique/.test(c)) return fail('payment_already_pending', 409);
-        if (/member_reference_key|memberReferenceKey/.test(c)) return fail('payment_reference_duplicate', 409);
         if (/gympassbeneficiary_/.test(c)) return fail('duplicate_beneficiary', 409);
       }
       throw err;
@@ -73,8 +73,8 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
       if (!p || p.purchaserId !== purchaserId) return fail('not_found', 404);
       if (p.status !== 'pending_payment') return fail('not_cancellable', 409);
       // A mobile-money prompt is on the member's phone: cancelling now would strand the money.
-      const live = p.paymentRequestId ? await trx('PaymentRequest').where({ id: p.paymentRequestId, status: 'pending', provider: 'tunzaa' }).whereNotNull('reference').first('id') : null;
-      if (live) return fail('payment_in_progress', 409);
+      const request = p.paymentRequestId ? await trx('PaymentRequest').where({ id: p.paymentRequestId }).first('status', 'provider', 'reference', 'promptedAt') : null;
+      if (pendingMobileMoneyInFlight(request)) return fail('payment_in_progress', 409);
       await trx('GymPassPurchase').where({ id: p.id }).update({ status: 'cancelled', updatedAt: at });
       if (p.paymentRequestId) {
         await trx('PaymentRequest').where({ id: p.paymentRequestId, status: 'pending' }).update({ status: 'cancelled', decidedAt: at });

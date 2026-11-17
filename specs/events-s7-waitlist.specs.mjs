@@ -1,5 +1,6 @@
 // Marathon & running events · S7 (B2) — the waitlist: joining, the queue gate, the promoter, offers as real orders, reconciliation, abuse limits,
 // organizer and admin controls (docs/design/events-s7-hardening-and-pilot.md §4, D70 to D76). Dormant behind EVENTS_WAITLIST.
+import './fixtures/azampay-env.mjs';
 import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
@@ -12,16 +13,14 @@ import {
 import { createEventOrder, listMyEventOrders, resetEventsRegistrationLimits } from '../functions/events-registration.mjs';
 import { eventDetail, eventsOptions } from '../functions/events-public.mjs';
 import { harness, s7On, s7Off, db, uid, eventually, H } from './fixtures/events-s7.mjs';
-import { saveManualDetails, clearManualDetails } from './fixtures/events-s4.mjs';
 import { eventsWaitlistService, eventStore, opsService } from '../src/bootstrap/services.mjs';
 import { eventsConsentTextVersion } from '../src/shared/events-config.mjs';
 
 await ensureInit();
 const h = harness();
 const { call } = h;
-before(async () => { await saveManualDetails(); });
 afterEach(() => { resetEventsWaitlistLimits(); resetEventsRegistrationLimits(); s7Off(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const NAMES = [['Asha', 'Mollel'], ['Baraka', 'Juma'], ['Cosmas', 'Nyerere'], ['Dotto', 'Kweka'], ['Eva', 'Abdallah'], ['Fatma', 'Mushi'], ['Gabo', 'Lyimo']];
 let seq = 0;
@@ -124,11 +123,11 @@ test('join refusals, in the spec order: not sold out, unavailable (closed / paym
   assert.equal(detail.body.categories[0].ticketTypes[0].waitlist.state, 'closed');
   await db('Event').where({ id: f.event.id }).update({ waitlistEnabled: true });
   // priced ticket while payments are off
-  delete process.env.MANUAL_PAY_INSTRUCTIONS;
+  delete process.env.EVENTS_PAYMENTS_AZAMPAY;
   const noPay = await join(f, holder);
   assert.deepEqual([noPay.body.error, noPay.body.reason], ['waitlist_unavailable', 'payments_unavailable']);
   assert.equal((await call(eventDetail, null, { params: { idOrSlug: f.event.id } })).body.categories[0].ticketTypes[0].waitlist.state, 'none');
-  process.env.MANUAL_PAY_INSTRUCTIONS = '1';
+  process.env.EVENTS_PAYMENTS_AZAMPAY = '1';
   // registration closed
   await db('Event').where({ id: f.event.id }).update({ registrationClosesAt: new Date(Date.now() - 1000) });
   assert.equal((await join(f, holder)).body.reason, 'registration_closed');
@@ -430,9 +429,9 @@ test('a closed sale ends the line: registration closed or the event cancelled cl
   const a = await member(); const b = await member();
   const ea = (await join(f, a)).body.entry.id; const eb = (await join(g, b)).body.entry.id;
   await free(f);
-  delete process.env.MANUAL_PAY_INSTRUCTIONS;
+  delete process.env.EVENTS_PAYMENTS_AZAMPAY;
   assert.equal((await eventsWaitlistService.promote()).offered, 0, 'priced ticket, payments off: entries wait');
-  process.env.MANUAL_PAY_INSTRUCTIONS = '1';
+  process.env.EVENTS_PAYMENTS_AZAMPAY = '1';
   await db('Event').where({ id: f.event.id }).update({ registrationClosesAt: new Date(Date.now() - 1000) });
   await db('Event').where({ id: g.event.id }).update({ status: 'cancelled', cancelledAt: new Date() });
   await eventsWaitlistService.promote();

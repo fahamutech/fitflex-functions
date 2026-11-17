@@ -90,9 +90,6 @@ export function createGymPassService({
   // WhatsApp may be dormant (status 'skipped:...'); SMS is then used. Either may be null.
   channels = null,
   localeOf = async () => null,
-  // (reference, payerPhone, memberId, product) → { error, status } | { memberReference, memberReferenceKey, payerPhone } | {}
-  memberReference = async () => ({}),
-  referenceFields = () => ({}),
   // The /gym-pass page lives in the portal: GYM_PASS_INVITE_BASE_URL, else PORTAL_PUBLIC_URL. Neither set → '' → no link is built or sent.
   baseLink = () => String(process.env.GYM_PASS_INVITE_BASE_URL || process.env.PORTAL_PUBLIC_URL || '').trim(),
   now = () => new Date(),
@@ -311,7 +308,7 @@ export function createGymPassService({
    * nothing is active until it is approved. Coverage by category: individual = the buyer; couples = the buyer and
    * exactly one other person; group = the buyer and 2 up to (limit - 1) others.
    */
-  async function purchase({ memberId, planId, beneficiaries = [], reference, payerPhone, termsVersion, expectedPriceTzs }) {
+  async function purchase({ memberId, planId, beneficiaries = [], termsVersion, expectedPriceTzs }) {
     const member = await users.findByIdAsync(memberId);
     if (!member || member.userType !== 'member' || member.accountStatus === 'suspended') return { error: 'not_allowed', status: 403 };
     const plan = planId ? await store.getPlan(String(planId)) : null;
@@ -336,15 +333,13 @@ export function createGymPassService({
     if (headcount.error) return { status: 400, ...headcount };
 
     if (await store.openPurchase(memberId, plan.id)) return { error: 'payment_already_pending', status: 409 };
-    const ref = await memberReference(reference, payerPhone, memberId, 'gym_pass');
-    if (ref.error) return ref;
 
     const at = iso();
     const purchaseId = store.newId('gpu');
     const payment = {
       id: `pay_${randomUUID().slice(0, 8)}`, memberId, subscriptionId: null, tier: null, plan: null, gymId: gym.id,
       amountTzs: snapshot.priceTzs, status: 'pending', provider: 'admin_approved', reference: null,
-      ...referenceFields(ref), requestedAt: at, decidedAt: null, decidedBy: null, note: 'gym_pass',
+      requestedAt: at, decidedAt: null, decidedBy: null, note: 'gym_pass',
     };
     const rows = [{
       id: store.newId('gpb'), purchaseId, userId: memberId, isPurchaser: true, slot: 1, status: 'active', createdAt: at, updatedAt: at,

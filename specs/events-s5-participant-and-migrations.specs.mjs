@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — what the participant sees (spec §4.6), flags-off identity with S4, and the two migrations (up, down, fail-closed).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

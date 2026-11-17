@@ -1,16 +1,18 @@
-// Phase B · B6a: trainer products paid by mobile money (Malipo by Tunzaa), behind
-// TUNZAA_TRAINER_PRODUCTS (effective only with TUNZAA_PAYMENTS).
+// Phase B · B6a: trainer products paid by mobile money (AzamPay), behind
+// AZAMPAY_TRAINER_PRODUCTS (effective only with AZAMPAY_PAYMENTS).
 //   TRAINER_SERVICE   a member paying for trainer sessions (booking group)
 //   TRAINER_GYM_PASS  a trainer buying a gym's trainer pass
 // Service-level on in-memory stores with the real admin payment and trainer
-// booking services; never a real Tunzaa call (the client is a test double).
+// booking services; never a real AzamPay call (the client is a test double).
+// AzamPay has no status query: what the provider "says" about a transaction (remote.statusOf)
+// reaches the service as its callback, which is how the helpers below deliver it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TunzaaError } from '../src/integrations/payments/tunzaa.mjs';
+import { AzamPayError, parseCallback } from '../src/integrations/payments/azampay.mjs';
 import { createMobileMoneyService } from '../src/services/mobile-money-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import { createTrainerBookingService } from '../src/services/trainer-booking-service.mjs';
-import { tunzaaTrainerProductsOn } from '../src/shared/feature-flags.mjs';
+import { azampayTrainerProductsOn } from '../src/shared/feature-flags.mjs';
 
 function memStore(rows = []) {
   return {
@@ -58,7 +60,7 @@ const booking = (id, over = {}) => ({
 /**
  * One world: payment requests, subscriptions, trainer bookings, the real admin payment
  * service (wired to the real trainer booking service as bootstrap wires it) and the
- * mobile-money service with a fake Tunzaa client.
+ * mobile-money service with a fake AzamPay client.
  */
 function world({
   enabled = true, trainerProducts = true, canSettle = true, secondApprover = false,
@@ -82,30 +84,50 @@ function world({
     onSubscriptionActivated: async (sub) => { activated.push(sub.id); },
     secondApprover: () => secondApprover,
   });
-  const remote = { initiated: [], statusOf: {}, failInitiate: null, statusCalls: 0 };
+  const remote = { initiated: [], statusOf: {}, failInitiate: null };
   const client = {
-    environment: 'sandbox',
+    environment: 'sandbox', confirmsByCallback: true, parseCallback,
     async initiatePayment(args) {
-      if (remote.failInitiate) throw new TunzaaError('no', { code: remote.failInitiate, status: 502 });
+      if (remote.failInitiate) throw new AzamPayError('no', { code: remote.failInitiate, status: 502 });
       remote.initiated.push(args);
       return { transactionId: `TXN_${remote.initiated.length}` };
     },
-    async checkStatus(id) {
-      remote.statusCalls += 1;
-      const s = remote.statusOf[id] || { status: 'PENDING', amount: null };
-      return { status: s.status, amountTzs: s.amount ? Number(s.amount) : null, transactionId: id, remark: s.remark || null };
-    },
   };
   const flags = { enabled, trainerProducts };
-  const service = createMobileMoneyService({
+  const real = createMobileMoneyService({
     paymentRequests, subscriptions, adminPaymentService, auditLog, client,
     enabled: () => flags.enabled, canSettle: () => canSettle,
-    // The real flag is effective only with TUNZAA_PAYMENTS on (see feature-flags).
+    // The real flag is effective only with AZAMPAY_PAYMENTS on (see feature-flags).
     trainerProducts: () => flags.trainerProducts && flags.enabled,
     beforeBookingPayment: wireBookingCheck
       ? (request) => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved')
       : null,
   });
+  /** AzamPay's callback for one transaction, from what the test says the provider answered. */
+  const azCallback = (txn, utilityref, s) => ({
+    transactionstatus: s.status === 'COMPLETED' ? 'success' : s.status === 'FAILED' ? 'failure' : 'pending',
+    operator: 'Mpesa', utilityref, transid: txn, amount: s.amount ?? '', message: s.remark ?? null,
+  });
+  /** The answer set for the prompt that is out (if any) arrives as AzamPay's callback. */
+  async function deliver(requestId) {
+    const r = paymentRequests.rows.find((x) => x.id === requestId);
+    if (!r || r.status !== 'pending' || r.provider !== 'azampay' || !r.reference || r.reference.startsWith('pending:')) return null;
+    const s = remote.statusOf[r.reference];
+    if (!s || !['COMPLETED', 'FAILED'].includes(s.status)) return null;
+    return real.handleCallback(azCallback(r.reference, `${r.id}.t`, s));
+  }
+  const service = {
+    ...real,
+    async refresh(args) {
+      const delivered = await deliver(args.paymentRequestId);
+      const out = await real.refresh(args);
+      // What the callback decided is what the member is told (a refresh alone only reports where the request stands).
+      return delivered && !out.error && ['failed', 'held'].includes(delivered.state) ? { ...out, state: delivered.state, reason: delivered.reason } : out;
+    },
+    handleCallback: (p) => real.handleCallback(azCallback(String(p.transaction_id), p.reference_id, {
+      status: p.status, amount: p.amount ?? remote.statusOf[p.transaction_id]?.amount, remark: p.remark,
+    })),
+  };
   return { subscriptions, paymentRequests, trainerBookings, audit, activated, service, remote, flags, trainerBookingService };
 }
 
@@ -115,19 +137,19 @@ const statuses = (w) => w.trainerBookings.rows.filter((b) => b.groupId === 'grp_
 
 // ── the flag ──────────────────────────────────────────────────────────────
 
-test('flag: TUNZAA_TRAINER_PRODUCTS is effective only together with TUNZAA_PAYMENTS', () => {
-  const saved = { a: process.env.TUNZAA_PAYMENTS, b: process.env.TUNZAA_TRAINER_PRODUCTS };
+test('flag: AZAMPAY_TRAINER_PRODUCTS is effective only together with AZAMPAY_PAYMENTS', () => {
+  const saved = { a: process.env.AZAMPAY_PAYMENTS, b: process.env.AZAMPAY_TRAINER_PRODUCTS };
   try {
     for (const [payments, trainer, expected] of [
       [undefined, undefined, false], ['1', undefined, false], [undefined, '1', false], ['1', '1', true], ['true', 'on', true], ['1', '0', false],
     ]) {
-      if (payments === undefined) delete process.env.TUNZAA_PAYMENTS; else process.env.TUNZAA_PAYMENTS = payments;
-      if (trainer === undefined) delete process.env.TUNZAA_TRAINER_PRODUCTS; else process.env.TUNZAA_TRAINER_PRODUCTS = trainer;
-      assert.equal(tunzaaTrainerProductsOn(), expected, `TUNZAA_PAYMENTS=${payments} TUNZAA_TRAINER_PRODUCTS=${trainer}`);
+      if (payments === undefined) delete process.env.AZAMPAY_PAYMENTS; else process.env.AZAMPAY_PAYMENTS = payments;
+      if (trainer === undefined) delete process.env.AZAMPAY_TRAINER_PRODUCTS; else process.env.AZAMPAY_TRAINER_PRODUCTS = trainer;
+      assert.equal(azampayTrainerProductsOn(), expected, `AZAMPAY_PAYMENTS=${payments} AZAMPAY_TRAINER_PRODUCTS=${trainer}`);
     }
   } finally {
-    if (saved.a === undefined) delete process.env.TUNZAA_PAYMENTS; else process.env.TUNZAA_PAYMENTS = saved.a;
-    if (saved.b === undefined) delete process.env.TUNZAA_TRAINER_PRODUCTS; else process.env.TUNZAA_TRAINER_PRODUCTS = saved.b;
+    if (saved.a === undefined) delete process.env.AZAMPAY_PAYMENTS; else process.env.AZAMPAY_PAYMENTS = saved.a;
+    if (saved.b === undefined) delete process.env.AZAMPAY_TRAINER_PRODUCTS; else process.env.AZAMPAY_TRAINER_PRODUCTS = saved.b;
   }
 });
 
@@ -301,7 +323,7 @@ test('settle confirms the booking group through decide({automated}); a double se
   const cb = await w.service.handleCallback({ transaction_id: 'TXN_1', reference_id: 'pay_s.k1', status: 'COMPLETED', amount: '40000.00' });
   assert.deepEqual([cb.status, cb.state], [200, 'completed']);
   const r = reqOf(w, 'pay_s');
-  assert.deepEqual([r.status, r.reference, r.decidedBy], ['approved', 'TXN_1', 'tunzaa']);
+  assert.deepEqual([r.status, r.reference, r.decidedBy], ['approved', 'TXN_1', 'azampay']);
   assert.deepEqual(statuses(w), ['confirmed', 'confirmed']);
 
   // Repeat callback and a refresh: still completed, decided once.
@@ -350,7 +372,7 @@ test('MONEY_SECOND_APPROVER on: a provider-confirmed payment needs no second adm
   const t = trainerPass();
   const dup = world({
     secondApprover: true, subs: [t.sub],
-    requests: [t.req, { id: 'pay_old', memberId: 'm7', subscriptionId: null, amountTzs: 15_000, status: 'approved', provider: 'tunzaa', reference: 'TXN_1' }],
+    requests: [t.req, { id: 'pay_old', memberId: 'm7', subscriptionId: null, amountTzs: 15_000, status: 'approved', provider: 'azampay', reference: 'TXN_1' }],
   });
   await dup.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
   dup.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
@@ -380,8 +402,8 @@ test('flag turned off while a trainer\'s prompt is out: they can refresh it (not
   assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t2' }), forbidden);
   assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'nope' }), forbidden);
 
-  w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
-  assert.equal((await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' })).state, 'completed');
+  // AzamPay's callback settles it (a refresh cannot ask AzamPay anything).
+  assert.equal((await w.service.handleCallback({ transaction_id: 'TXN_1', reference_id: 'pay_t.a', status: 'COMPLETED', amount: '15000.00' })).state, 'completed');
   assert.equal(subOf(w, 'sub_t').status, 'active');
   // Settled: nothing live any more, so the trainer is back to 403.
   assert.deepEqual(await w.service.refresh({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t' }), forbidden);
@@ -426,14 +448,14 @@ test('once the prompt has failed (or its claim expired), cancelling works and sh
 
   // A claim that never produced a prompt and has expired does not block (the app may retry anyway).
   const stale = world({
-    requests: [sessionRequest({ provider: 'tunzaa', reference: `pending:${Date.now() - 10 * 60_000}` })],
+    requests: [sessionRequest({ provider: 'azampay', reference: `pending:${Date.now() - 10 * 60_000}` })],
     bookings: [booking('bk_1'), booking('bk_2', { slot: '08:00' })],
   });
   assert.equal((await stale.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' })).error, undefined);
   assert.equal(reqOf(stale, 'pay_s').amountTzs, 20_000);
   // A recent claim does block.
   const fresh = world({
-    requests: [sessionRequest({ provider: 'tunzaa', reference: `pending:${Date.now()}` })],
+    requests: [sessionRequest({ provider: 'azampay', reference: `pending:${Date.now()}` })],
     bookings: [booking('bk_1')],
   });
   assert.equal((await fresh.trainerBookingService.memberCancelBooking({ memberId: 'm1', bookingId: 'bk_1' })).error, 'payment_in_progress');
@@ -448,7 +470,7 @@ test('a prompt claimed between the cancel\'s read and its write: the payment is 
   w.paymentRequests.findByIdAsync = async (id) => {
     if (id === 'pay_s' && first) {
       first = false;
-      Object.assign(w.paymentRequests.rows[0], { provider: 'tunzaa', reference: 'TXN_RACE' });
+      Object.assign(w.paymentRequests.rows[0], { provider: 'azampay', reference: 'TXN_RACE' });
       return snapshot;
     }
     return realFind(id);
@@ -474,11 +496,11 @@ test('settle holds money confirmed for a different transaction than the one the 
   assert.deepEqual(statuses(w), ['confirmed']);
 });
 
-test('a transaction already used on another approved payment is held whatever MONEY_SECOND_APPROVER / MANUAL_PAY_INSTRUCTIONS say', async () => {
+test('a transaction already used on another approved payment is held whatever MONEY_SECOND_APPROVER says', async () => {
   const t = trainerPass();
   const w = world({
     secondApprover: false, subs: [t.sub],
-    requests: [t.req, { id: 'pay_old', memberId: 'm7', subscriptionId: null, amountTzs: 15_000, status: 'approved', provider: 'tunzaa', reference: 'TXN_1' }],
+    requests: [t.req, { id: 'pay_old', memberId: 'm7', subscriptionId: null, amountTzs: 15_000, status: 'approved', provider: 'azampay', reference: 'TXN_1' }],
   });
   await w.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
   w.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };
@@ -490,7 +512,7 @@ test('a transaction already used on another approved payment is held whatever MO
   // A pending or cancelled request carrying the same id does not count.
   const ok = world({
     subs: [t.sub],
-    requests: [t.req, { id: 'pay_c', memberId: 'm7', amountTzs: 15_000, status: 'cancelled', provider: 'tunzaa', reference: 'TXN_1' }],
+    requests: [t.req, { id: 'pay_c', memberId: 'm7', amountTzs: 15_000, status: 'cancelled', provider: 'azampay', reference: 'TXN_1' }],
   });
   await ok.service.pay({ memberId: 't1', role: 'trainer', paymentRequestId: 'pay_t', phone: PHONE });
   ok.remote.statusOf.TXN_1 = { status: 'COMPLETED', amount: '15000.00' };

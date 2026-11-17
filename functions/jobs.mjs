@@ -189,7 +189,7 @@ export const eventLifecycle = {
 
 export const eventPaymentReconciliation = {
   created, rule: '25 * * * *', // hourly
-  description: 'Events payments (S4): re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to rerun and to overlap (advisory lock, idempotent steps). The work, its run record and lock are in src/bootstrap/services.mjs (event-payment-reconciliation) and ops-service.mjs.',
+  description: 'Events payments (S4): re-applies approved payments whose order is not confirmed, expires AzamPay prompts whose callback never came (AzamPay has no status query), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to rerun and to overlap (advisory lock, idempotent steps). The work, its run record and lock are in src/bootstrap/services.mjs (event-payment-reconciliation) and ops-service.mjs.',
   onJob: async () => {
     if (!eventsRegistrationOn()) return;
     const r = await opsService.runJob('event-payment-reconciliation');

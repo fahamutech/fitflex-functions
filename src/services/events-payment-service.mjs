@@ -1,6 +1,7 @@
 // Marathon & running events · S4 — payments, ticket issuance and the finance view (spec §3.4–§3.11, §3.14, §3.15).
 //
-//   mode()                          'none' | 'manual' | 'provider' — the one way an order can be paid right now (fail closed: no ticket secret → 'none')
+//   mode()                          'none' | 'provider' — the one way a MEMBER's order can be paid right now: AzamPay (fail closed: no ticket secret → 'none').
+//                                   An organisation's order is paid by a payment notice ('manual': bank transfer or mobile money, checked by finance).
 //   initiate / initiateCorporate    POST /me/event-orders/:id/payment, POST /b2b/organizations/:id/event-orders/:orderId/payment
 //   paymentStatus                   GET …/payment-status (cheap, safe to poll)
 //   beforeEventOrderPayment         read-only checks run inside admin-payment-service.checkConfirmation
@@ -21,7 +22,7 @@ import { billingRecipients } from '../infra/event-money-store-pg.mjs';
 import {
   canonicalFingerprint, IDEMPOTENCY_KEY_RE, localTimeIn, localHourMinuteIn,
 } from '../shared/events-participants.mjs';
-import { normalizePaymentReference, normalizePayerPhone, DUPLICATE_ATTEMPT_ACTION, DUPLICATE_ATTEMPT_LIMIT } from '../shared/manual-payment.mjs';
+import { normalizePaymentReference, DUPLICATE_ATTEMPT_ACTION, DUPLICATE_ATTEMPT_LIMIT } from '../shared/manual-payment.mjs';
 import { redactProviderPayload } from '../shared/events-payment-redact.mjs';
 import { deriveToken, sha256hex, qrPayloadOf, displayCodeOf } from '../shared/events-ticket-token.mjs';
 import { paginate } from '../shared/pagination.mjs';
@@ -56,9 +57,9 @@ export const eventOutcomeOf = request => (request && typeof request === 'object'
 
 export function createEventsPaymentService({
   db, eventStore, money, registration, users, references,
-  manualPayment = { required: () => false, options: () => ({ enabled: false }) },
-  flags = { manual: () => false, tunzaa: () => false },
-  // The Tunzaa path is effective (flag, TUNZAA_PAYMENTS, client configured and allowed to settle). Read on every call.
+  // manual: an organisation's payment notice (EVENTS_PAYMENTS_MANUAL); provider: a member pays through AzamPay (EVENTS_PAYMENTS_AZAMPAY).
+  flags = { manual: () => false, provider: () => false },
+  // The AzamPay path is effective (AZAMPAY_PAYMENTS, client configured and allowed to settle). Read on every call.
   providerEffective = () => false,
   providerSettle = async () => ({ state: 'none' }),
   notify = async () => {}, localeOf = async () => null, track = async () => {},
@@ -69,7 +70,7 @@ export function createEventsPaymentService({
   const R = () => registration.internals;
   // M4: fail closed unless two admins are on money (or the owner accepted a single approver).
   const approverGate = () => eventsApproverGateOpen();
-  const intakeOn = () => Boolean(flags.manual() || flags.tunzaa());
+  const intakeOn = () => Boolean(flags.manual() || flags.provider());
 
   const audit = async (actor, action, target, before, after) => {
     try { await db('AuditLog').insert({ id: randomUUID(), at: now(), actor: actor || 'system', action, target, before: json(before ?? null), after: json(after ?? null) }); } catch { /* best effort */ }
@@ -83,15 +84,14 @@ export function createEventsPaymentService({
   // ── Mode ────────────────────────────────────────────────────────────────────
 
   /**
-   * The one way an order can be paid right now (§3.1). 'provider' only when the Tunzaa event flag is effective; else 'manual'
-   * when EVENTS_PAYMENTS_MANUAL, MANUAL_PAY_INSTRUCTIONS and the Lipa Namba are all set; else 'none'. Always 'none' without a
-   * usable EVENT_TICKET_SECRET: a payment that cannot produce tickets must not be taken.
+   * The one way a member's order can be paid right now (§3.1): 'provider' (AzamPay) when the event flag is effective, else
+   * 'none'. Members do not pay by hand (owner decision 2026-11-17). Always 'none' without a usable EVENT_TICKET_SECRET:
+   * a payment that cannot produce tickets must not be taken.
    */
   function mode() {
     if (!keyRing()) return 'none';
     if (!approverGate()) return 'none';
-    if (flags.tunzaa() && providerEffective()) return 'provider';
-    if (flags.manual() && manualPayment.required()) return 'manual';
+    if (flags.provider() && providerEffective()) return 'provider';
     return 'none';
   }
 
@@ -100,7 +100,6 @@ export function createEventsPaymentService({
     const payment = mode();
     return {
       payment,
-      ...(payment === 'manual' ? { manualConfirmHours: eventsManualConfirmSlaHours() } : {}),
       hold: { manualExtendHours: eventManualHoldExtendHours(), manualMaxHours: eventManualHoldMaxHours(), providerExtendMinutes: eventsProviderHoldExtendMinutes(), lateGraceHours: eventsLatePaymentGraceHours() },
       tickets: { qr: true, scanning: eventsKitOpsOn() },
     };
@@ -121,7 +120,7 @@ export function createEventsPaymentService({
     }
     const submittedAt = payment.submittedAt ?? (manual ? payment.createdAt : null);
     return {
-      id: payment.id, state, method: payment.method ?? (payment.provider === 'tunzaa' ? 'provider' : payment.provider === 'free' ? 'free' : 'manual'),
+      id: payment.id, state, method: payment.method ?? (payment.provider === 'azampay' ? 'provider' : payment.provider === 'free' ? 'free' : 'manual'),
       amountTzs: Number(payment.amountTzs), currency: payment.currency,
       reference: req?.memberReference ?? null, payerPhoneMasked: maskPayerPhone(req?.payerPhone),
       submittedAt: iso(submittedAt), decidedAt: ['succeeded', 'failed', 'cancelled'].includes(payment.status) ? iso(payment.verifiedAt ?? payment.updatedAt) : null,
@@ -147,7 +146,7 @@ export function createEventsPaymentService({
     };
   }
 
-  /** `next` of an order response (§3.5): the way to pay it now, with the instructions the member pays first and submits after. */
+  /** `next` of an order response (§3.5): the way to pay it now (a member: the AzamPay prompt; an organisation: the payment details it pays first and submits after). */
   async function nextFor(order, { access = null, payment = undefined } = {}) {
     const live = payment === undefined ? await latestPayment(order.id) : payment;
     const paymentRequestId = live && LIVE_PAYMENT.includes(live.status) ? live.paymentRequestId ?? null : null;
@@ -161,16 +160,6 @@ export function createEventsPaymentService({
     const m = mode();
     if (m === 'none') return { payment: 'none', instructions: null };
     if (Number(order.totalTzs) === 0) return { payment: m, paymentRequestId, instructions: null };
-    if (m === 'manual') {
-      const o = manualPayment.options();
-      return {
-        payment: 'manual', paymentRequestId,
-        instructions: o.enabled ? {
-          lipaNamba: o.lipaNamba, accountName: o.accountName, network: o.network ?? null, instructions: o.instructions ?? null, amountTzs: Number(order.totalTzs),
-          reference: order.reference, referenceRequired: o.referenceRequired, payerPhoneRequired: o.payerPhoneRequired,
-        } : null,
-      };
-    }
     return { payment: 'provider', paymentRequestId, instructions: null };
   }
 
@@ -411,29 +400,22 @@ export function createEventsPaymentService({
     const free = Number(order0.totalTzs) === 0;
     const m = access ? 'manual' : mode();
     if (!free && m === 'none') return fail('payment_mode_mismatch', 409, { mode: 'none' });
-    if (!access && !free && m === 'manual' && body.reference == null && body.payerPhone == null) return fail('payment_mode_mismatch', 409, { mode: m });
     if (!access && !free && m === 'provider' && (body.reference != null || body.payerPhone != null)) return fail('payment_mode_mismatch', 409, { mode: m });
 
-    // Manual fields: the same validators as passes (one transaction ID confirms one payment across every product).
+    // An organisation's payment notice: the transaction ID it paid with (one transaction ID confirms one payment across every product).
     let fields = {};
     let paidOn = null; let payerMethod = null; let orgNote = null;
-    if (!free && (m === 'manual' || access)) {
+    if (!free && access) {
       const ref = normalizePaymentReference(body.reference);
       if (ref.error) return fail(ref.error, 400);
       fields = { memberReference: ref.reference, memberReferenceKey: ref.key };
-      if (access) {
-        if (!['bank_transfer', 'mobile_money'].includes(body.method)) return fail('invalid_method', 400, { allowed: ['bank_transfer', 'mobile_money'] });
-        payerMethod = body.method;
-        if (!isStr(body.paidOn) || !/^\d{4}-\d{2}-\d{2}$/.test(body.paidOn) || Number.isNaN(+new Date(`${body.paidOn}T00:00:00Z`))) return fail('invalid_paid_on', 400);
-        if (body.paidOn > eatDay(now())) return fail('invalid_paid_on', 400, { reason: 'future' });
-        paidOn = body.paidOn;
-        orgNote = isStr(body.note) && body.note.trim() ? body.note.trim().slice(0, 300) : null;
-        if (isStr(body.note) && body.note.trim().length > 300) return fail('note_too_long', 400, { max: 300 });
-      } else {
-        const phone = normalizePayerPhone(body.payerPhone);
-        if (phone.error) return fail(phone.error, 400);
-        fields.payerPhone = phone.phone;
-      }
+      if (!['bank_transfer', 'mobile_money'].includes(body.method)) return fail('invalid_method', 400, { allowed: ['bank_transfer', 'mobile_money'] });
+      payerMethod = body.method;
+      if (!isStr(body.paidOn) || !/^\d{4}-\d{2}-\d{2}$/.test(body.paidOn) || Number.isNaN(+new Date(`${body.paidOn}T00:00:00Z`))) return fail('invalid_paid_on', 400);
+      if (body.paidOn > eatDay(now())) return fail('invalid_paid_on', 400, { reason: 'future' });
+      paidOn = body.paidOn;
+      orgNote = isStr(body.note) && body.note.trim() ? body.note.trim().slice(0, 300) : null;
+      if (isStr(body.note) && body.note.trim().length > 300) return fail('note_too_long', 400, { max: 300 });
     }
     const fingerprint = canonicalFingerprint({ orderId: order0.id, reference: fields.memberReference ?? null, payerPhone: fields.payerPhone ?? null, method: payerMethod, paidOn, note: orgNote, free });
     const earlier = await replayFor(order0.id, key, fingerprint, loaded, access);
@@ -466,7 +448,7 @@ export function createEventsPaymentService({
         const event = plain(await trx('Event').where({ id: order.eventId }).first());
         if (!event || !['published', 'registration_closed'].includes(event.status) || +new Date(event.startsAt) <= +at) throw refuse('event_not_open', 409, { eventStatus: event?.status ?? null });
         if (order.currency !== 'TZS') throw refuse('unsupported_currency', 409);
-        // A late payment is a manual one: the provider prompt is not offered once the hold has ended.
+        // A late payment is an organisation's notice only: the AzamPay prompt is not offered once the hold has ended.
         if (late && m === 'provider' && !access) throw refuse('hold_expired', 409);
         const live = plain(await trx('EventPayment').where({ orderId: order.id }).whereIn('status', LIVE_PAYMENT).first());
         if (live) throw refuse('payment_in_progress', 409, { payment: await paymentView(live, { order }) });
@@ -474,7 +456,7 @@ export function createEventsPaymentService({
         const method = free ? 'free' : (m === 'provider' && !access) ? 'provider' : 'manual';
         const organizerId = event.organizerId;
         const base = {
-          id: paymentId, orderId: order.id, eventId: order.eventId, organizerId, provider: free ? 'free' : method === 'provider' ? 'tunzaa' : 'manual', method,
+          id: paymentId, orderId: order.id, eventId: order.eventId, organizerId, provider: free ? 'free' : method === 'provider' ? 'azampay' : 'manual', method,
           merchantReference: paymentId, amountTzs: Number(order.totalTzs), currency: order.currency, idempotencyKey: `${order.id}:${key}`, idempotencyFingerprint: fingerprint,
           lateOrder: late, organizationId: access ? access.org.id : null, payerMethod, paidOn, createdAt: at, updatedAt: at,
         };
@@ -620,7 +602,7 @@ export function createEventsPaymentService({
           const revived = payment.status === 'failed';
           result = await money.confirmPaidOrder(trx, {
             orderId: payment.orderId, eventPaymentId: payment.id, source: meta.automated ? 'provider' : 'admin', actorId: meta.actorId ?? null, allowFailed: revived,
-            rawRedacted: meta.providerPayload ? redactProviderPayload('tunzaa', meta.providerPayload) : undefined, expectedAmountTzs: request.amountTzs,
+            rawRedacted: meta.providerPayload ? redactProviderPayload('azampay', meta.providerPayload) : undefined, expectedAmountTzs: request.amountTzs,
           });
         } else if (status === 'rejected') {
           if (!['pending', 'created'].includes(payment.status)) throw refuse('event_payment_change_not_allowed', 409, { paymentStatus: payment.status });
@@ -799,15 +781,25 @@ export function createEventsPaymentService({
         }
       });
     },
-    /** Money confirmed but not accepted (amount / transaction mismatch, ticket secret missing): hold for people, no ticket, no commit. */
+    /** Money confirmed but not accepted (amount / transaction mismatch, ticket secret missing): hold for people, no ticket, no commit. detail: { transactionId, keepPayable? }. */
     async onHeld(request, reason, detail = {}) {
       const payment = plain(await db('EventPayment').where({ paymentRequestId: request.id }).first());
       if (!payment) return;
       const code = ['amount_mismatch', 'transaction_mismatch'].includes(reason) ? reason : (reason === 'tickets_unavailable' ? 'provider_unknown' : reason);
+      // keepPayable: the money is for a prompt that was given up while a newer prompt of the same payment is open
+      // (or being sent). The payment is left as it is so the new prompt can settle and staff can still approve;
+      // people are told under a key of its own, so it is not folded into another exception of this payment.
+      if (detail.keepPayable) {
+        await audit('azampay', 'events.payment_superseded_attempt_paid', payment.orderId, null, { paymentId: payment.id, reason: code, transactionId: detail.transactionId ?? null });
+        if (ops) {
+          try { await ops.raise({ type: 'events_payment_reconciliation', severity: 'high', title: 'An event payment was also paid on an earlier prompt — refund or apply it by hand', dedupeKey: `evpay:${payment.id}:${detail.transactionId ?? 'superseded'}`, entityType: 'EventPayment', entityId: payment.id, detail: { orderId: payment.orderId, reason: code, transactionId: detail.transactionId ?? null } }); } catch { /* best effort */ }
+        }
+        return;
+      }
       if (payment.status === 'pending' || payment.status === 'created') {
         await db('EventPayment').where({ id: payment.id }).whereIn('status', ['pending', 'created']).update({ status: 'reconciliation_required', failureReason: code, updatedAt: now() });
       }
-      await audit('tunzaa', 'events.payment_reconciliation_required', payment.orderId, null, { paymentId: payment.id, reason: code });
+      await audit('azampay', 'events.payment_reconciliation_required', payment.orderId, null, { paymentId: payment.id, reason: code });
       if (ops) {
         try { await ops.raise({ type: 'events_payment_reconciliation', severity: 'high', title: 'An event mobile-money payment needs a person', dedupeKey: `evpay:${payment.id}`, entityType: 'EventPayment', entityId: payment.id, detail: { orderId: payment.orderId, reason: code, ...detail } }); } catch { /* best effort */ }
       }
@@ -815,7 +807,7 @@ export function createEventsPaymentService({
     /** The provider answered FAILED: the attempt is over (EventPayment failed, the request cancelled); the hold keeps running and the member can retry. */
     async onFailed(request, remark = null) {
       await db.transaction(async (trx) => {
-        await trx('PaymentRequest').where({ id: request.id, status: 'pending' }).update({ status: 'cancelled', decidedAt: now(), decidedBy: 'tunzaa', note: 'event_order: provider reported failed' });
+        await trx('PaymentRequest').where({ id: request.id, status: 'pending' }).update({ status: 'cancelled', decidedAt: now(), decidedBy: 'azampay', note: 'event_order: provider reported failed' });
         await trx('EventPayment').where({ paymentRequestId: request.id }).whereIn('status', ['created', 'pending']).update({ status: 'failed', failureReason: 'provider_failed', updatedAt: now() });
       });
       void remark;
@@ -823,8 +815,8 @@ export function createEventsPaymentService({
   };
 
   /**
-   * The hourly job (§3.11.7, §3.7.8, §3.10): repair approved-but-unconfirmed requests; settle provider prompts whose callback
-   * was lost and expire stale ones; retry unsent claim invitations once; re-apply paid refunds whose places were not updated.
+   * The hourly job (§3.11.7, §3.7.8, §3.10): repair approved-but-unconfirmed requests; expire AzamPay prompts whose callback
+   * never came (AzamPay has no status query; a success that still arrives later is held for staff, never lost); retry unsent claim invitations once; re-apply paid refunds whose places were not updated.
    * Bounded per run; safe to run twice and on two servers (confirmPaidOrder and every step are idempotent).
    */
   async function sweep({ limit = 100, refunds = null } = {}) {
@@ -845,7 +837,7 @@ export function createEventsPaymentService({
       }
     }
     // (b) provider prompts: pending > 5 minutes, or unknown after a timeout
-    const prompts = await db('EventPayment').where({ provider: 'tunzaa' }).where(b => b.where(c => c.where('status', 'pending').where('updatedAt', '<', new Date(+at - 5 * MINUTE)))
+    const prompts = await db('EventPayment').where({ provider: 'azampay' }).where(b => b.where(c => c.where('status', 'pending').where('updatedAt', '<', new Date(+at - 5 * MINUTE)))
       .orWhere(c => c.where('status', 'reconciliation_required').where({ failureReason: 'provider_unknown' }))).whereNotNull('paymentRequestId').orderBy('updatedAt').limit(limit);
     for (const p of prompts) {
       try {
@@ -853,7 +845,7 @@ export function createEventsPaymentService({
         if (out?.state === 'completed') stats.settled += 1;
         else if (out?.state !== 'held' && +at - +new Date(p.submittedAt ?? p.createdAt) > 30 * MINUTE) {
           await db.transaction(async (trx) => {
-            await trx('PaymentRequest').where({ id: p.paymentRequestId, status: 'pending' }).update({ status: 'cancelled', decidedAt: at, decidedBy: 'tunzaa', note: 'event_order: prompt not completed in time' });
+            await trx('PaymentRequest').where({ id: p.paymentRequestId, status: 'pending' }).update({ status: 'cancelled', decidedAt: at, decidedBy: 'azampay', note: 'event_order: prompt not completed in time' });
             await trx('EventPayment').where({ id: p.id }).whereIn('status', ['created', 'pending']).update({ status: 'expired', failureReason: 'prompt_expired', updatedAt: at });
           });
           stats.expired += 1;

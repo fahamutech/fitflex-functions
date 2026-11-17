@@ -1,9 +1,7 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
 import { createMobileMoneyService } from '../services/mobile-money-service.mjs';
-import { createTunzaaClient, tunzaaSettings } from '../integrations/payments/tunzaa.mjs';
-import { createAzamPayClient, azampaySettings } from '../integrations/payments/azampay.mjs';
-import { AZAMPAY_PROVIDER } from '../shared/mobile-money-claim.mjs';
+import { createAzamPayClient, azampaySettings, azampayConfigProblem } from '../integrations/payments/azampay.mjs';
 import { promoteStartedSubscriptions } from '../shared/subscription-status.mjs';
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
@@ -39,10 +37,9 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
-import { azampayPaymentsOn, azampayTrainerProductsOn, azampaySandboxSettlesOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
-import { orgOnlySponsorsOn, identityFlag, tunzaaPaymentsOn, tunzaaTrainerProductsOn, tunzaaSandboxSettlesOn, manualPayInstructionsOn, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
+import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, azampaySandboxUnsignedCallbacksOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
+import { orgOnlySponsorsOn, identityFlag, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
-import { manualPaymentConfigured, manualPaymentOptions } from '../shared/manual-payment.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
 import { smsSender as plainSmsSender, emailSender } from '../infra/verification-senders.mjs';
 import { createSmsProvider } from '../integrations/sms/provider.mjs';
@@ -62,7 +59,6 @@ import { createAdminApprovalService } from '../services/admin-approval-service.m
 import { createFinanceService } from '../services/finance-service.mjs';
 import { createInvoiceService } from '../services/invoice-service.mjs';
 import { createPortalUserService } from '../services/portal-user-service.mjs';
-import { createWebhookService } from '../services/webhook-service.mjs';
 import { createTrainerEngagementService } from '../services/trainer-engagement-service.mjs';
 import { createTermsService } from '../services/terms-service.mjs';
 import { createPgShopOrderStore } from '../infra/shop-order-store-pg.mjs';
@@ -188,7 +184,7 @@ import { createEventsRosterService } from '../services/events-roster-service.mjs
 import { createEventsPaymentService, eventOutcomeOf } from '../services/events-payment-service.mjs';
 import { createEventsRefundService } from '../services/events-refund-service.mjs';
 import { createPgEventMoneyStore } from '../infra/event-money-store-pg.mjs';
-import { eventsPaymentsManualOn, eventsPaymentsTunzaaOn } from '../shared/feature-flags.mjs';
+import { eventsPaymentsManualOn, eventsPaymentsAzampayOn } from '../shared/feature-flags.mjs';
 import { eventTicketKeyRing, eventsRefundTargetDays } from '../shared/events-config.mjs';
 import { eventsMaxParticipantsPerOrder, eventsConsentTextVersion } from '../shared/events-config.mjs';
 import { registerOrganizerLookup } from '../auth/events-authz.mjs';
@@ -703,15 +699,6 @@ export const authService = createAuthService({
   partnerAgeGuard: ({ user }) => personalDetailsService.assertPartnerAge({ user }),
 });
 
-/**
- * Slice A3: manual mobile-money payment. Off unless MANUAL_PAY_INSTRUCTIONS is
- * set; on, it applies only once the admin has saved a Lipa Namba and account name.
- */
-export const manualPayment = {
-  flagOn: () => manualPayInstructionsOn(),
-  required: () => manualPayInstructionsOn() && manualPaymentConfigured(settingsService.manualPaymentSettings()),
-  options: () => manualPaymentOptions(settingsService.manualPaymentSettings(), manualPayInstructionsOn()),
-};
 export const paymentReferenceStore = createPaymentReferenceStore({ db });
 // A renewal paid before the member's current plan ended is stored 'scheduled' and becomes
 // active when its start comes: on the member's next read or check-in, or by the sweep job.
@@ -729,8 +716,7 @@ const onSubscriptionScheduled = async (sub, ctx) => {
   try { await promotionEventsService.recordSubscription(sub, ctx); } catch { /* best-effort */ }
 };
 export const subscriptionService = createSubscriptionService({
-  subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId, manualPayment,
-  auditLog, referenceStore: paymentReferenceStore,
+  subscriptions, paymentRequests, checkins, gyms, settingsService, publicUserId,
   eventLabels: requests => eventsPaymentsService.paymentLabels(requests),
   promoteStarted: promoteStartedPlans,
 });
@@ -858,8 +844,8 @@ export const adminMemberService = createAdminMemberService({
 });
 export const adminPaymentService = createAdminPaymentService({
   paymentRequests, subscriptions, users, auditLog, gyms,
-  // Slice A3 (review L1): the final reference of an approval is checked for reuse.
-  referenceStore: paymentReferenceStore, manualReferenceChecks: manualPayInstructionsOn,
+  // Slice A3 (review L1): the final reference of an approval is checked for reuse when the request carries a typed transaction ID.
+  referenceStore: paymentReferenceStore,
   onSubscriptionActivated: async (sub, ctx) => {
     await finishSponsoredPass(sub);
     await notificationService.notifySubscriptionActivated(sub);
@@ -901,87 +887,69 @@ export const adminPaymentService = createAdminPaymentService({
   listEventRequests: opts => eventsPaymentsService.listRequests(opts),
   eventOutcomeOf,
 });
-// Pay by mobile money (Malipo by Tunzaa). Dormant unless TUNZAA_PAYMENTS is set; the
-// client exists only when MALIPO_API_KEY and MALIPO_API_SECRET are both set.
-const tunzaaConfig = tunzaaSettings();
-export const tunzaaSecretKey = tunzaaConfig?.secretKey ?? null;
-if (tunzaaConfig && tunzaaPaymentsOn() && tunzaaConfig.environment !== 'live') {
-  console.warn(`[tunzaa] payments are ON against the SANDBOX${tunzaaSandboxSettlesOn() ? ' and sandbox payments settle real plans (TUNZAA_SANDBOX_SETTLES)' : ' but will not be offered (set TUNZAA_SANDBOX_SETTLES to rehearse)'}`);
+// Pay by mobile money through AzamPay, the only payment provider (owner decision 2026-11-17).
+// Dormant unless AZAMPAY_PAYMENTS is set; the client exists only when AZAMPAY_APP_NAME,
+// AZAMPAY_CLIENT_ID and AZAMPAY_CLIENT_SECRET are set.
+const azampayConfig = azampaySettings();
+// AZAMPAY_ENV=live without usable live hosts: closed, never quietly the sandbox (azampaySettings answers null).
+const azampayProblem = azampayConfigProblem();
+if (azampayProblem) {
+  console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${azampayProblem === 'live_hosts_not_https' ? 'a live host is not https://' : 'AZAMPAY_AUTH_URL / AZAMPAY_CHECKOUT_URL are not both set'}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
 }
-export const tunzaaMobileMoneyService = createMobileMoneyService({
+export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
+// One line at start-up: what AzamPay configuration this server sees (yes/no only, never a value).
+console.info('[azampay] config', JSON.stringify({
+  appName: Boolean(process.env.AZAMPAY_APP_NAME), clientId: Boolean(process.env.AZAMPAY_CLIENT_ID),
+  clientSecret: Boolean(process.env.AZAMPAY_CLIENT_SECRET), apiKey: Boolean(process.env.AZAMPAY_API_KEY),
+  callbackUser: Boolean(process.env.AZAMPAY_CALLBACK_USER), callbackPassword: Boolean(process.env.AZAMPAY_CALLBACK_PASSWORD),
+  envSetting: process.env.AZAMPAY_ENV ?? null, environment: azampayConfig?.environment ?? null, client: Boolean(azampayConfig),
+  problem: azampayProblem ?? null, payments: azampayPaymentsOn(), sandboxSettles: azampaySandboxSettlesOn(),
+  sandboxUnsignedCallbacks: azampaySandboxUnsignedCallbacksOn(),
+}));
+if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
+  console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
+}
+/** The mobile-money service the routes use (POST /me/payments/:id/mobile-money, POST /webhooks/azampay). */
+export const mobileMoneyService = createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
-  client: tunzaaConfig ? createTunzaaClient({ settings: tunzaaConfig }) : null,
-  enabled: tunzaaPaymentsOn,
+  client: azampayClient,
+  enabled: azampayPaymentsOn,
   // Sandbox transactions still activate real plans, so against the sandbox this
-  // must be asked for (TUNZAA_SANDBOX_SETTLES); live needs nothing extra.
-  canSettle: () => tunzaaConfig?.environment === 'live' || tunzaaSandboxSettlesOn(),
-  // Sandbox only (the client ignores it on live): 'success' or 'failure' to rehearse an outcome.
-  scenario: tunzaaConfig?.environment === 'sandbox' ? (process.env.MALIPO_SANDBOX_SCENARIO || process.env.TUNZAA_SANDBOX_SCENARIO || null) : null,
+  // must be asked for (AZAMPAY_SANDBOX_SETTLES); live needs nothing extra.
+  canSettle: () => Boolean(azampayConfig) && (azampayConfig.environment === 'live' || azampaySandboxSettlesOn()),
   // Only tiers configured in Settings are sold (owner decision 2026-10-19).
   tierSellable: settingsService.isTierSellable,
-  // B6a: trainer sessions and trainer gym passes (TUNZAA_TRAINER_PRODUCTS, needs TUNZAA_PAYMENTS).
-  trainerProducts: tunzaaTrainerProductsOn,
+  // B6a: trainer sessions and trainer gym passes (AZAMPAY_TRAINER_PRODUCTS, needs AZAMPAY_PAYMENTS).
+  trainerProducts: azampayTrainerProductsOn,
   // A rejected session whose slot was booked by someone else since is not asked for (409 group_slot_rebooked).
   beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
-  // Marathon & Events S4 (EVENTS_PAYMENTS_TUNZAA, off): event orders become payable by mobile money. Built dormant (D1).
+  // Marathon & Events S4 (EVENTS_PAYMENTS_AZAMPAY, off): event orders become payable by mobile money.
   eventOrders: {
-    enabled: () => eventsPaymentsTunzaaOn() && Boolean(eventTicketKeyRing()),
+    enabled: () => eventsPaymentsAzampayOn() && Boolean(eventTicketKeyRing()),
     beforePrompt: request => eventsPaymentsService.hooks.beforePrompt(request),
     afterPrompt: (request, transactionId) => eventsPaymentsService.hooks.afterPrompt(request, transactionId),
     onHeld: (request, reason, detail) => eventsPaymentsService.hooks.onHeld(request, reason, detail),
     onFailed: (request, remark) => eventsPaymentsService.hooks.onFailed(request, remark),
+  },
+  // Money AzamPay confirmed that was not approved (passes, plans, trainer products, shop orders): staff are told
+  // the way they are for events — an ops exception, one per request and transaction. Event orders raise their own.
+  onHeld: (request, reason, detail) => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: `AzamPay money for payment ${request.id} was not applied (${reason}) — check it by hand`,
+    dedupeKey: `azampay_held:${request.id}:${detail?.transactionId ?? 'unknown'}`,
+    entityType: 'payment_request', entityId: request.id,
+    detail: { reason, ...detail },
+  }),
+  // Shop orders (AZAMPAY_SHOP_ORDERS, off): a member's own order, while it still waits for this payment.
+  shopOrders: {
+    enabled: azampayShopOrdersOn,
+    beforePrompt: request => shopService.checkOrderPrompt(request),
   },
   webhookSeen: {
     has: async id => Boolean(await db('WebhookSeen').where({ id }).first('id')),
     mark: async id => { await db('WebhookSeen').insert({ id, at: new Date() }).onConflict('id').ignore(); },
   },
 });
-// Pay by mobile money through AzamPay. Dormant unless AZAMPAY_PAYMENTS is set; the client
-// exists only when AZAMPAY_APP_NAME, AZAMPAY_CLIENT_ID and AZAMPAY_CLIENT_SECRET are set.
-// On, AzamPay REPLACES Tunzaa for new payments (owner decision 2026-11-15). Event orders stay
-// on Tunzaa's dormant flow (EVENTS_PAYMENTS_TUNZAA) until they are moved separately.
-const azampayConfig = azampaySettings();
-export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
-if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
-  console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
-}
-export const azampayMobileMoneyService = createMobileMoneyService({
-  paymentRequests, subscriptions, adminPaymentService, auditLog,
-  client: azampayClient,
-  provider: AZAMPAY_PROVIDER,
-  enabled: azampayPaymentsOn,
-  canSettle: () => azampayConfig?.environment === 'live' || azampaySandboxSettlesOn(),
-  tierSellable: settingsService.isTierSellable,
-  trainerProducts: azampayTrainerProductsOn,
-  beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
-  // Event orders are not payable through AzamPay yet.
-  eventOrders: null,
-  webhookSeen: null,
-});
-/**
- * The mobile-money service the routes use. New payments go to AzamPay while
- * AZAMPAY_PAYMENTS is on, else to Tunzaa as before. A refresh is answered by the
- * provider the request was sent through, so a Tunzaa prompt that is out when
- * AzamPay is switched on still settles.
- */
-const newPaymentsService = () => (azampayPaymentsOn() ? azampayMobileMoneyService : tunzaaMobileMoneyService);
-async function serviceForRequest(paymentRequestId) {
-  const request = paymentRequestId ? await paymentRequests.findByIdAsync(paymentRequestId) : null;
-  if (request?.provider === AZAMPAY_PROVIDER) return azampayMobileMoneyService;
-  if (request?.provider === 'tunzaa') return tunzaaMobileMoneyService;
-  return newPaymentsService();
-}
-export const mobileMoneyService = {
-  options: () => newPaymentsService().options(),
-  payableProducts: role => newPaymentsService().payableProducts(role),
-  pay: args => newPaymentsService().pay(args),
-  refresh: async args => (await serviceForRequest(args?.paymentRequestId)).refresh(args),
-  settleById: async id => (await serviceForRequest(id)).settleById(id),
-  /** Tunzaa's signed callback (POST /webhooks/tunzaa). */
-  handleCallback: payload => tunzaaMobileMoneyService.handleCallback(payload),
-  /** AzamPay's callback (POST /webhooks/azampay); the route verifies the signature first. */
-  handleAzamPayCallback: payload => azampayMobileMoneyService.handleCallback(payload),
-};
 export const adminOwnerService = createAdminOwnerService({
   users, gyms, checkins, auditLog, gymService, gymPayoutOwner,
   onOwnerRemoved: async (prior) => {
@@ -1024,13 +992,6 @@ export const portalUserService = createPortalUserService({
   initFirebaseAdmin: () => portalFirebaseAdmin.init(), getAdminAuth: () => portalFirebaseAdmin.auth(),
   // The start password is checked with the same server key as PINs.
   pepper: () => pinPepper(), forgetSession: invalidateAccountStatus,
-});
-export const webhookService = createWebhookService({
-  subscriptions, webhookSeen, paymentRequests,
-  onSubscriptionActivated: lifecycle.activated,
-  onSubscriptionScheduled,
-  scheduleRenewals: scheduledRenewalsOn,
-  onPaymentFailed: (sub, paymentId) => lifecycle.paymentFailed(sub, { reference: `selcom:${paymentId}` }),
 });
 export const gymReviewService = createGymReviewService({
   usernames: usernamesLazy, gymReviews, gyms, checkins, subscriptions, users, auditLog,
@@ -1131,8 +1092,6 @@ export const gymPassService = createGymPassService({
   contacts: { findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor },
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
-  memberReference: (reference, payerPhone, memberId, product) => subscriptionService.memberReferenceFor(reference, payerPhone, memberId, product),
-  referenceFields: ref => subscriptionService.referenceFields(ref),
   channels: {
     whatsapp: async ({ phone, kind, params, locale, reference }) => {
       if (!whatsappChannelService.available()) return { status: 'skipped:whatsapp_not_available' };
@@ -1599,14 +1558,14 @@ export const eventsRegistrationService = createEventsRegistrationService({
 });
 export const eventsRosterService = createEventsRosterService({ db, registration: eventsRegistrationService, users, closingSoonHours: eventsClosingSoonHours, getRefunds: () => eventsRefundsService });
 
-// Marathon & running events · S4: payments (manual path first; Tunzaa built dormant), tickets, refunds. Dormant behind
-// EVENTS_PAYMENTS_MANUAL / EVENTS_PAYMENTS_TUNZAA: with both off GET /events/options.payment is 'none' and S3 is unchanged.
+// Marathon & running events · S4: payments (members through AzamPay; an organisation by payment notice), tickets, refunds. Dormant behind
+// EVENTS_PAYMENTS_AZAMPAY / EVENTS_PAYMENTS_MANUAL: with both off GET /events/options.payment is 'none' and S3 is unchanged.
 export const eventsPaymentsService = createEventsPaymentService({
-  db, eventStore, money: eventMoneyStore, registration: eventsRegistrationService, users, references: paymentReferenceStore, manualPayment,
-  flags: { manual: eventsPaymentsManualOn, tunzaa: eventsPaymentsTunzaaOn },
-  // Event orders are paid through Tunzaa only (not moved to AzamPay yet).
-  providerEffective: () => tunzaaMobileMoneyService.options().enabled === true,
-  providerSettle: requestId => tunzaaMobileMoneyService.settleById(requestId),
+  db, eventStore, money: eventMoneyStore, registration: eventsRegistrationService, users, references: paymentReferenceStore,
+  flags: { manual: eventsPaymentsManualOn, provider: eventsPaymentsAzampayOn },
+  // A member's event order is paid through AzamPay.
+  providerEffective: () => mobileMoneyService.options().enabled === true,
+  providerSettle: requestId => mobileMoneyService.settleById(requestId),
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: eventsLocaleOf,
   ops: opsService,
@@ -1619,7 +1578,7 @@ export const eventsRefundsService = createEventsRefundService({
 });
 opsService.register({
   name: 'event-payment-reconciliation', hidden: () => !eventsModuleOn(), heartbeat: true, title: 'Event payment reconciliation', schedule: { type: 'every', minutes: 60 }, quiet: true, domain: 'finance',
-  description: 'Event payments: re-applies approved payments whose order is not confirmed, settles Tunzaa prompts whose callback was lost (and expires stale ones), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to run twice.',
+  description: 'Event payments: re-applies approved payments whose order is not confirmed, expires AzamPay prompts whose callback never came (AzamPay has no status query), retries unsent claim invitations once, and re-applies paid refunds whose places were not updated. Does nothing unless EVENTS_MODULE and EVENTS_REGISTRATION are on. Bounded to 100 rows per step; safe to run twice.',
   run: async () => {
     if (!eventsRegistrationOn()) return { processed: 0, succeeded: 0, failed: 0, skipped: 'flag_off' };
     const r = await eventsPaymentsService.sweep({ refunds: eventsRefundsService });

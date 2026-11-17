@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — the /v1/organizer endpoints (spec §5.3–§5.5): field minimisation by scope, pagination, writes with
 // Idempotency-Key, event restriction, SCENARIO 19 (cross-event / cross-organizer access), the sandbox, error shapes.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

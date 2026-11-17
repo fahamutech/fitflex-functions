@@ -1147,7 +1147,7 @@ test('the live service is wired: approving through the real payment service acti
   assert.equal(decided.paymentRequest.status, 'approved');
   assert.equal((await childSubs(out.purchase.id)).length, 1);
   assert.equal((await db('GymPassPurchase').where({ id: out.purchase.id }).first()).status, 'active');
-  assert.ok(subscriptionService.memberReferenceFor, 'reference checks are shared with the legacy purchase flow');
+  assert.equal(subscriptionService.memberReferenceFor, undefined, 'members no longer type a transaction ID: a custom pass is paid through AzamPay or approved by staff');
 });
 
 test('migration: new columns exist and are nullable; legacy rows are untouched', async () => {

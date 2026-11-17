@@ -190,7 +190,7 @@ test('race 2: mobile money is refused (409 group_slot_rebooked) for a booking pa
     paymentRequests, subscriptions: { findByIdAsync: async () => null }, adminPaymentService: null, auditLog: null,
     client: { environment: 'sandbox', initiatePayment: async () => { prompts += 1; return { transactionId: 'TXN-RACE-2' }; } },
     enabled: () => true, canSettle: () => true,
-    // As wired in bootstrap (B6a); trainer sessions payable this way (TUNZAA_TRAINER_PRODUCTS on).
+    // As wired in bootstrap (B6a); trainer sessions payable this way (AZAMPAY_TRAINER_PRODUCTS on).
     trainerProducts: () => true,
     beforeBookingPayment: request => trainerBookingService.checkGroupPayment(request.bookingGroupId, 'approved'),
   });

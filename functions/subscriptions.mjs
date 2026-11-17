@@ -15,12 +15,12 @@ export const listPasses = {
 
 export const subscribe = {
   created, method: 'post', path: '/me/subscribe',
-  description: 'Create a pilot Platform Pass (or gym plan) payment request. Admin approval activates the subscription; when the member already has a running plan of the same product (FitFlex Pass, or the same gym\'s plan), the paid plan is scheduled instead and starts when the current one ends (GET /me scheduledRenewals). 409 renewal_already_scheduled: one renewal may wait at a time. While manual payment is on (GET /payments/options manual.enabled) `reference` (the mobile-money transaction ID) and `payerPhone` (the number paid from) are required: 400 payment_reference_required / payment_reference_invalid / payer_phone_required / payer_phone_invalid, 409 payment_reference_duplicate, 429 too_many_attempts.',
-  requestSample: { tier: 'pro', type: 'platform_pass', reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
+  description: 'Create a Platform Pass (or gym plan) payment request. Its payment through AzamPay (or an admin approval) activates the subscription; when the member already has a running plan of the same product (FitFlex Pass, or the same gym\'s plan), the paid plan is scheduled instead and starts when the current one ends (GET /me scheduledRenewals). 409 renewal_already_scheduled: one renewal may wait at a time. The request is then paid through AzamPay (POST /me/payments/:id/mobile-money); a transaction ID typed by the member is no longer taken (`reference` / `payerPhone` in the body are ignored).',
+  requestSample: { tier: 'pro', type: 'platform_pass' },
   onGuard: routeGuard('post', requireAuth('member')),
   onRequest: async (req, res) => {
-    const { tier, type = 'platform_pass', homeGymId, plan, reference, payerPhone } = req.body || {};
-    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId, plan, reference, payerPhone });
+    const { tier, type = 'platform_pass', homeGymId, plan } = req.body || {};
+    const result = await subscriptionService.subscribe({ memberId: req.user.sub, tier, type, homeGymId, plan });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ subscription: result.subscription, paymentRequest: result.paymentRequest });
   }
@@ -39,12 +39,12 @@ export const upgradeOptions = {
 
 export const upgradePass = {
   created, method: 'post', path: '/me/upgrade',
-  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval upgrades the plan in place (same end date, same visits used). While manual payment is on, `reference` (the mobile-money transaction ID) and `payerPhone` are required, as for /me/subscribe.',
-  requestSample: { tier: 'pro', reference: 'QGH7XK2L9P', payerPhone: '0712345678' },
+  description: 'Upgrade the FitFlex Pass: creates a payment request for the price difference. Approval upgrades the plan in place (same end date, same visits used). Paid through AzamPay as for /me/subscribe (`reference` / `payerPhone` in the body are ignored).',
+  requestSample: { tier: 'pro' },
   onGuard: routeGuard('post', requireAuth('member')),
   onRequest: async (req, res) => {
-    const { tier, reference, payerPhone } = req.body || {};
-    const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier, reference, payerPhone });
+    const { tier } = req.body || {};
+    const result = await subscriptionService.upgradePass({ memberId: req.user.sub, tier });
     if (result.error) return res.status(result.status).json({ error: result.error });
     res.status(result.status).json({ paymentRequest: result.paymentRequest, upgradeFrom: result.upgradeFrom, endsAt: result.endsAt });
   }

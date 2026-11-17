@@ -5,7 +5,8 @@
 // by its last three digits. The result is serialised at most 2 KB or dropped entirely. manual and free write null.
 
 export const ALLOWLISTS = Object.freeze({
-  tunzaa: Object.freeze(['transaction_id', 'reference_id', 'status', 'amount', 'payment_date', 'timestamp', 'remark']),
+  // AzamPay's checkout callback, as parseCallback keeps it (never user, password, clientId, msisdn or the signature).
+  azampay: Object.freeze(['transactionstatus', 'operator', 'reference', 'externalreference', 'utilityref', 'amount', 'transid', 'mnoreference', 'message']),
 });
 const MAX_BYTES = 2048;
 const REMARK_MAX = 200;
@@ -26,14 +27,12 @@ function scrub(value) {
 export function redactProviderPayload(provider, payload) {
   const allow = ALLOWLISTS[provider];
   if (!allow || !payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
-  // Tunzaa's status read spells the id `transactionID`; the callback spells it `transaction_id`. Same field, one name.
-  if (provider === 'tunzaa' && !own(payload, 'transaction_id') && own(payload, 'transactionID')) payload = { ...payload, transaction_id: payload.transactionID };
   const out = { provider };
   for (const key of allow) {
     if (!own(payload, key)) continue;
     let v = scrub(payload[key]);
     if (v === undefined) continue;
-    if (key === 'remark' && typeof v === 'string') v = v.trim().slice(0, REMARK_MAX);
+    if ((key === 'remark' || key === 'message') && typeof v === 'string') v = v.trim().slice(0, REMARK_MAX);
     out[key] = v;
   }
   if (Object.keys(out).length <= 1) return null;

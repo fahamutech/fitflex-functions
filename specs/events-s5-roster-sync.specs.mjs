@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — the roster with a keyset cursor, the change feed, and the audited CSV export (spec §4.5, scenario 19 for the feeds).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { sign } from '../src/auth/jwt.mjs';

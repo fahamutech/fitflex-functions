@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — kit handover (spec §4.2, scenario 11: QR screenshot replay / repeated collection; scenario 12 primitives).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
