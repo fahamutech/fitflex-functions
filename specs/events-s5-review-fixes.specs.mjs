@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — fixes from the security, contract and Swahili reviews of PR #279 (M1 M3 M4 M5 L1 L3 L4 L6 L10, contract, F1–F4).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

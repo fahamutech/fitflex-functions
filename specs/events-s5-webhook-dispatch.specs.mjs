@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — webhook endpoints and the dispatcher (spec §7.2, §7.4, §7.5).
 // SCENARIO 13 (endpoint times out, then recovers), SCENARIO 14 (invalid signature / replayed event), SSRF at delivery time, auto-disable, manual retry.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

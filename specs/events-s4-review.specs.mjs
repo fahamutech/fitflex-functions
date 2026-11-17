@@ -1,4 +1,5 @@
 // Marathon & running events · S4 — the review fixes of PR #270 (security H1, M1–M6, L1–L9; rulings a–c; contract 3–15; Swahili).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
@@ -10,13 +11,13 @@ import { adminCancelEventOrder, adminCancelEvent, adminRepairEventPayment, admin
 import { createB2BEventOrder, getB2BEventOrder, payB2BEventOrder, resetEventsCorporateLimits } from '../functions/events-corporate.mjs';
 import { eventStore, eventsPaymentsService, eventsRefundsService, financeService, paymentRequests, opsService } from '../src/bootstrap/services.mjs';
 import { describePolicy } from '../src/shared/events-refund-policy.mjs';
-import { harness, s4On, s4Off, saveManualDetails, clearManualDetails, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
+import { harness, submittedByHand, s4On, s4Off, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
 
 await ensureInit();
 const h = harness();
 const { db, call } = h;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); resetEventsAdminLimits(); resetEventsCorporateLimits(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const key = () => `rv_${uid('').slice(1)}`;
 const member = async () => { const p = phone(); const sub = await h.user({ phone: p }); return { claims: h.claimsOf(sub), sub, phone: p }; };
@@ -30,7 +31,7 @@ async function eventWith(policy, { price = 20000, capacity = 10 } = {}) {
   await db('Event').where({ id: f.event.id }).update({ refundPolicySnapshot: JSON.stringify(policy) });
   return f;
 }
-const setup = async (policy = POLICY.until_close, opts) => { s4On(); await saveManualDetails(); return { f: await eventWith(policy, opts), b: await member() }; };
+const setup = async (policy = POLICY.until_close, opts) => { s4On(); return { f: await eventWith(policy, opts), b: await member() }; };
 async function place(f, b, n = 1) {
   const participants = Array.from({ length: n }, (_, i) => (i === 0
     ? { ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }
@@ -42,9 +43,10 @@ async function place(f, b, n = 1) {
   return r.body;
 }
 const submit = async (b, orderId) => {
-  const r = await call(payForEventOrder, b.claims, { params: { id: orderId }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });
+  const r = await call(payForEventOrder, b.claims, { params: { id: orderId }, headers: { 'Idempotency-Key': key() }, body: {} });
   assert.equal(r.status, 201, JSON.stringify(r.body));
-  return db('PaymentRequest').where({ eventOrderId: orderId }).first();
+  // These are specs of the staff tools on a payment submitted by hand (see submittedByHand in the fixture).
+  return submittedByHand(orderId, { payerPhone: b.phone });
 };
 async function paid(f, b, n = 1) {
   const o = await place(f, b, n);
@@ -183,14 +185,14 @@ test('M4: with one approver (no MONEY_SECOND_APPROVER) the mode is none and noth
   delete process.env.EVENTS_ALLOW_SINGLE_APPROVER;
   assert.equal(eventsPaymentsService.mode(), 'none');
   assert.equal(eventsPaymentsService.optionsBlock().payment, 'none');
-  const r = await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });
+  const r = await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   assert.deepEqual([r.status, r.body.error, r.body.mode], [409, 'payment_mode_mismatch', 'none']);
   assert.equal((await db('EventPayment').where({ orderId: o.order.id })).length, 0);
   process.env.MONEY_SECOND_APPROVER = '1';
-  assert.equal(eventsPaymentsService.mode(), 'manual');
+  assert.equal(eventsPaymentsService.mode(), 'provider');
   delete process.env.MONEY_SECOND_APPROVER;
   process.env.EVENTS_ALLOW_SINGLE_APPROVER = '1';
-  assert.equal(eventsPaymentsService.mode(), 'manual');
+  assert.equal(eventsPaymentsService.mode(), 'provider');
 });
 
 // ── M5 + ruling (a) ──────────────────────────────────────────────────────
@@ -264,7 +266,7 @@ test('M6: the refund batch is resumed by the sweep; an order with one held place
 // ── Ruling (b): organisation refunds ─────────────────────────────────────
 
 test('ruling (b): an organisation refund reaches only a coordinator who still holds a billing role; otherwise the billing contacts; never listed for someone who left; a missing coordinator does not break the refund', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventWith(POLICY.until_close);
   const org = await h.organization();
   const finance = await org.member('finance');
@@ -383,10 +385,8 @@ test('Swahili: tiered line grammar, plurals, the date when a hold runs past toda
   process.env.EVENTS_MANUAL_CONFIRM_SLA_HOURS = '1';
   const o = await place(f, b);
   await submit(b, o.order.id);
-  const n = (await h.notifications(b.sub, 'event_payment_submitted'))[0];
-  assert.match(n.data.bodyEn, /within 1 hour\. /);
-  assert.match(n.data.bodyEn, /held until tomorrow \d{2}:\d{2}\./);
-  assert.match(n.data.bodySw, /saa 1\. .*hadi kesho \d{1,2}:\d{2}/);
+  // (the "payment received · being checked" notice now goes to an organisation only: a member pays through AzamPay)
+  assert.equal((await h.notifications(b.sub, 'event_payment_submitted')).length, 0);
   delete process.env.EVENTS_MANUAL_CONFIRM_SLA_HOURS;
   // rejection: every code has en + sw text; admin notes are labelled in Swahili unless a Swahili note was sent
   const a = await admin();
@@ -476,7 +476,7 @@ test('Swahili: an unfulfilled payment says "Malipo yatarejeshwa"; the cancelled-
 // ── Final contract re-check ──────────────────────────────────────────────
 
 test('(4) a corporate order shows next.payment "none" while the launch gate is closed, "manual" once it opens', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventWith(POLICY.until_close);
   const org = await h.organization();
   const finance = await org.member('finance');

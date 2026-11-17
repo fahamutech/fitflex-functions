@@ -1,4 +1,5 @@
 // Marathon & running events · S5 — ticket verification (spec §4.1): the six results, masking, tenancy, rate limits, audit, flags.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

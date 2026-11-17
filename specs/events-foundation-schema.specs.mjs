@@ -304,7 +304,7 @@ test('payment CHECKs and PaymentRequest.eventOrderId', () => inRollback(async (t
   await rejects(trx, t => t('EventPayment').insert(pay({ amountTzs: -1 })), '23514');
   await trx('EventPayment').insert(pay({ providerTransactionId: 'TX1' }));
   await rejects(trx, t => t('EventPayment').insert(pay({ providerTransactionId: 'TX1' })), '23505');       // one row per provider transaction
-  await trx('EventPayment').insert(pay({ provider: 'tunzaa', providerTransactionId: 'TX1' }));              // another provider may reuse the id
+  await trx('EventPayment').insert(pay({ provider: 'azampay', providerTransactionId: 'TX1' }));              // another provider may reuse the id
   const mr = uid('MR');
   await trx('EventPayment').insert(pay({ merchantReference: mr }));
   await rejects(trx, t => t('EventPayment').insert(pay({ merchantReference: mr })), '23505');

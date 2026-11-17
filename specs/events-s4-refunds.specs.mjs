@@ -3,6 +3,7 @@
 // cancellation, ticket revocation and inventory (`uncommit`) rules, manual review, partial cancellation, idempotency and
 // races (member vs admin vs event), the admin paid-order cancel, the refund batch of a cancelled event (scenario 10),
 // refund approval by a second admin, what a paid refund does to places, order and payment, and the finance totals.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
@@ -13,13 +14,13 @@ import { adminDecideRefund, adminMarkRefundPaid, adminListRefunds, adminRaiseRef
 import { adminCancelEventOrder, adminCancelEvent, adminEventCancelPreview, adminRunEventRefundBatch, adminEventFinance, adminGetEventOrder, resetEventsAdminLimits } from '../functions/events-admin.mjs';
 import { organizerEventFinance, organizerCancelEvent, resetEventsOrganizerLimits } from '../functions/events-organizer.mjs';
 import { eventStore } from '../src/bootstrap/services.mjs';
-import { harness, s4On, s4Off, saveManualDetails, clearManualDetails, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
+import { harness, submittedByHand, s4On, s4Off, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
 
 await ensureInit();
 const h = harness();
 const { db, call } = h;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); resetEventsAdminLimits(); resetEventsOrganizerLimits(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const key = () => `rf_${uid('').slice(1)}`;
 const member = async () => { const p = phone(); const sub = await h.user({ phone: p }); return { claims: h.claimsOf(sub), sub, phone: p }; };
@@ -49,7 +50,7 @@ async function paid(f, b, n = 1, { admins = null } = {}) {
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   assert.equal(o.status, 201, JSON.stringify(o.body));
-  const p = await call(payForEventOrder, b.claims, { params: { id: o.body.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });
+  const p = await call(payForEventOrder, b.claims, { params: { id: o.body.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   assert.equal(p.status, 201, JSON.stringify(p.body));
   const a = admins ?? await admin();
   const request = await db('PaymentRequest').where({ eventOrderId: o.body.order.id }).first();
@@ -65,7 +66,7 @@ async function paid(f, b, n = 1, { admins = null } = {}) {
   return { orderId: o.body.order.id, regs, total: q.body.quote.totalTzs };
 }
 const setup = async (policy, opts = {}) => {
-  s4On(opts.env); await saveManualDetails();
+  s4On(opts.env);
   const f = await eventWith(policy, opts);
   return { f, b: await member() };
 };
@@ -305,7 +306,7 @@ test('admin cancels a paid order: refundMode full | policy | none; a note is req
   assert.equal((await db('EventOrder').where({ id: orderId }).first()).refundedTzs, 20000);
   // admin list rows carry the event fields; policy admin cancel with `policy` mode on no_refund gives nothing
   const listed = (await call(adminListRefunds, a, { query: { status: 'paid' } })).body.refunds.find(x => x.id === refund.id);
-  assert.deepEqual([listed.scope, listed.event.title, listed.orderReference.startsWith('EV-'), listed.payerPhone], ['order', 'Dar Half Marathon', true, b.phone]);
+  assert.deepEqual([listed.scope, listed.event.title, listed.orderReference.startsWith('EV-'), listed.payerPhone], ['order', 'Dar Half Marathon', true, null]);   // an AzamPay payment stores no paying phone
   const two = await paid(f, b, 1);
   const noRefund = await call(adminCancelEventOrder, a, { params: { id: f.event.id, orderId: two.orderId }, body: { note: 'by policy', refundMode: 'policy' } });
   assert.deepEqual([noRefund.body.order.status, noRefund.body.refund], ['cancelled', null]);
@@ -323,7 +324,8 @@ test('scenario 10: an event with 3 paid orders and 2 unpaid is cancelled — unp
     return (await call(createEventOrder, u.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
   };
   const w = await mk(waiting); const i = await mk(idle);
-  await call(payForEventOrder, waiting.claims, { params: { id: w.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: waiting.phone } });
+  await call(payForEventOrder, waiting.claims, { params: { id: w.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
+  await submittedByHand(w.order.id);   // a payment waiting for staff (as an organisation's notice does)
   const a = await admin(); const second = await admin();
   const preview = (await call(adminEventCancelPreview, a, { params: { id: f.event.id } })).body;
   assert.deepEqual(preview, { awaitingOrders: 2, awaitingWithSubmittedPayment: 1, paidOrders: 3, paidPlaces: 4, totalPaidTzs: 80000, alreadyRefundedTzs: 0, refundableTzs: 80000, openRefunds: 0 });
@@ -394,7 +396,7 @@ test('unfulfilled-payment refunds: admin raises one for an approved payment whos
   const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: u.phone, consentBasis: 'self' }] };
   const q = await call(quoteEventOrder, u.claims, { body });
   const o = (await call(createEventOrder, u.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
-  await call(payForEventOrder, u.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: u.phone } });
+  await call(payForEventOrder, u.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   await eventStore.releaseOrder(o.order.id, 'admin');
   const request = await db('PaymentRequest').where({ eventOrderId: o.order.id }).first();
   const done = await call(adminDecideRefund.onRequest ? adminDecidePaymentRequest : adminDecidePaymentRequest, a, { params: { id: request.id }, body: { decision: 'approve', amountTzs: 20000 } });
@@ -412,7 +414,7 @@ test('unfulfilled-payment refunds: admin raises one for an approved payment whos
   const u2 = await member();
   const body2 = { ...body, participants: [{ ...body.participants[0], phone: u2.phone }] };
   const o2 = (await call(createEventOrder, u2.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body2, expectedTotalTzs: 20000 } })).body;
-  await call(payForEventOrder, u2.claims, { params: { id: o2.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: u2.phone } });
+  await call(payForEventOrder, u2.claims, { params: { id: o2.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   const req2 = await db('PaymentRequest').where({ eventOrderId: o2.order.id }).first();
   await db('PaymentRequest').where({ id: req2.id }).update({ status: 'approved', decidedAt: new Date(), reference: 'MM-88' });
   await eventStore.releaseOrder(o2.order.id, 'admin');

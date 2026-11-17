@@ -20,7 +20,7 @@
 //
 // When triggers are checked:
 //   - events (a payment approved or rejected, an owner adding or renewing
-//     a member, Selcom) fire at once;
+//     a member, AzamPay) fire at once;
 //   - an hourly sweep checks every trigger again — expiry dates, lapsed
 //     members, and the last two days of activations and failed payments —
 //     so a lost event or a failed run is caught up. Scheduled triggers

@@ -1,5 +1,6 @@
 // Marathon & running events · S5 — the payout schedule (spec §3, D33): required at submit, free in a draft, locked after submit, changed after
 // publication only by a FitFlex admin with a reason (audited, organizer told). A label for the later settlement slice: no date, no amount.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';

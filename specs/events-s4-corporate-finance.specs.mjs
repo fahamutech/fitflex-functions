@@ -1,5 +1,6 @@
 // Marathon & running events · S4 — corporate payment (spec §3.4.3, §6.8), claim invitations on confirmation (D15, §3.10),
 // the organizer / admin finance totals and what an organizer may never see (§3.14, §7.4).
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
@@ -13,13 +14,13 @@ import { adminDecideRefund, adminMarkRefundPaid } from '../functions/refunds.mjs
 import { eventStore, eventMoneyStore, eventsRegistrationService, eventsRefundsService, users, verifiedContacts, eventCatalogueStore, paymentReferenceStore } from '../src/bootstrap/services.mjs';
 import { createEventsRegistrationService } from '../src/services/events-registration-service.mjs';
 import { createEventsPaymentService } from '../src/services/events-payment-service.mjs';
-import { harness, s4On, s4Off, saveManualDetails, clearManualDetails, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
+import { harness, s4On, s4Off, txId, uid, phone, D, H } from './fixtures/events-s4.mjs';
 
 await ensureInit();
 const h = harness();
 const { db, call } = h;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); resetEventsCorporateLimits(); resetEventsAdminLimits(); resetEventsOrganizerLimits(); });
-after(async () => { await clearManualDetails(); await db('B2BPaymentInstruction').where({ id: 'spec-s4' }).del(); await h.cleanup(); await db.destroy(); });
+after(async () => { await db('B2BPaymentInstruction').where({ id: 'spec-s4' }).del(); await h.cleanup(); await db.destroy(); });
 
 const key = () => `cf_${uid('').slice(1)}`;
 const member = async () => { const p = phone(); const sub = await h.user({ phone: p }); return { claims: h.claimsOf(sub), sub, phone: p }; };
@@ -28,7 +29,7 @@ const rowsFor = n => Array.from({ length: n }, (_, i) => ({ firstName: ['Asha', 
 const eventOf = (over = {}) => h.sellingEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'Corporate', priceTzs: 20000, capacity: 20 }] }], ...over });
 
 async function corporateOrder(n = 2) {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventOf();
   const org = await h.organization();
   const finance = await org.member('finance');
@@ -88,7 +89,7 @@ test('corporate payment: a billing user records a bank transfer; instructions co
   assert.ok(confirmed.registrations.every(r => r.ticket === null), 'an organisation never sees a ticket');
   assert.ok(confirmed.registrations.every(r => r.invitation && 'sentAt' in r.invitation));
   assert.ok(confirmed.allowedActions.includes('cancel_refund'));
-  // provider (mobile prompt) mode is never offered to an organisation: the notice stays manual even when Tunzaa mode is on
+  // provider (mobile prompt) mode is never offered to an organisation: the notice stays manual even when the AzamPay mode is on
   void f;
 });
 
@@ -117,7 +118,7 @@ test('corporate cancel of a PAID order: preview, expectedRefundTzs, the refund g
 });
 
 test('claim invitations (D15): sent only after the order is confirmed, one per unclaimed non-self place, a fresh link each; resend invalidates the old link and is capped; a send failure never undoes the confirmation', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventOf();
   const sentSms = [];
   let smsOk = true;
@@ -130,8 +131,7 @@ test('claim invitations (D15): sent only after the order is confirmed, one per u
   const registration2 = createEventsRegistrationService({ db, eventStore, catalogue: eventCatalogueStore, users, verifiedContacts, senders, getPayments: () => payments2, getRefunds: () => eventsRefundsService, shareBase: () => 'https://app.test' });
   payments2 = createEventsPaymentService({
     db, eventStore, money: eventMoneyStore, registration: registration2, users, references: paymentReferenceStore,
-    manualPayment: { required: () => true, options: () => ({ enabled: true, lipaNamba: '5123456', accountName: 'FitFlex', referenceRequired: true, payerPhoneRequired: true }) },
-    flags: { manual: () => true, tunzaa: () => false },
+    flags: { manual: () => true, provider: () => true }, providerEffective: () => true,
   });
   const b = await member();
   const friendPhone = phone(); const noContact = null;
@@ -146,7 +146,7 @@ test('claim invitations (D15): sent only after the order is confirmed, one per u
   // nothing is sent before payment
   assert.equal(sentSms.length, 0);
   assert.equal((await registration2.inviteClaims({ orderId: o.order.id })).error, 'order_not_confirmed');
-  const p = await payments2.initiate({ userId: b.sub, orderId: o.order.id, body: { reference: txId(), payerPhone: b.phone }, idempotencyKey: key() });
+  const p = await payments2.initiate({ userId: b.sub, orderId: o.order.id, body: {}, idempotencyKey: key() });
   assert.equal(p.status, 201, JSON.stringify(p));
   assert.equal(sentSms.length, 0, 'a submitted payment sends no invitation');
   const request = await db('PaymentRequest').where({ eventOrderId: o.order.id }).first();
@@ -185,7 +185,7 @@ test('claim invitations (D15): sent only after the order is confirmed, one per u
 // ── Finance ──────────────────────────────────────────────────────────────
 
 test('finance: totals only — paid, refunded, pending, awaiting, commission on money kept (rate stamped at confirmation), expected net, by ticket type; roles, foreign events and privacy', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventOf();
   await db('EventOrganizer').where({ id: f.organizer.id }).update({ commissionPct: 10 });
   const a = await admin();
@@ -196,7 +196,7 @@ test('finance: totals only — paid, refunded, pending, awaiting, commission on 
     const q = await call(quoteEventOrder, b.claims, { body });
     const o = (await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
     const ref = txId();
-    await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: ref, payerPhone: b.phone } });
+    await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
     return { b, o, n, ref };
   };
   const one = await buy(1); const three = await buy(3); const unpaid = await buy(2);
@@ -242,15 +242,17 @@ test('finance: totals only — paid, refunded, pending, awaiting, commission on 
 });
 
 test('the admin order panel: full payer phone with the payments scope, masked without; tickets counted, never a token; refunds listed', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await eventOf();
   const b = await member();
   const body = { eventId: f.event.id, lines: [{ ticketTypeId: f.ticket.id, quantity: 1 }], acceptedTerms: true, consentTextVersion: '2026-11-draft', participants: [{ ticketTypeId: f.ticket.id, firstName: 'Neema', lastName: 'Abdallah', phone: b.phone, consentBasis: 'self' }] };
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = (await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } })).body;
-  await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });
+  await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   const a = await admin();
   const req = await db('PaymentRequest').where({ eventOrderId: o.order.id }).first();
+  // A paying phone is on requests made by hand before 2026-11-17 only (AzamPay payments store none): the panel still masks it.
+  await db('PaymentRequest').where({ id: req.id }).update({ payerPhone: b.phone });
   await call(adminDecidePaymentRequest, a, { params: { id: req.id }, body: { decision: 'approve', amountTzs: 20000 } });
   const full = await call(adminGetEventOrder, a, { params: { id: f.event.id, orderId: o.order.id } });
   assert.equal(full.status, 200, JSON.stringify(full.body));

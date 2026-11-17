@@ -7,6 +7,7 @@ import { generateKeyPairSync, createSign, privateDecrypt, constants as cryptoCon
 import {
   azampaySettings, AZAMPAY_SANDBOX_HOSTS, toMsisdn, networkFor, amountToTzs, callbackSignedText,
   verifyCallbackSignature, parseCallback, disburseChecksum, createAzamPayClient, AzamPayError, maybeSent,
+  azampayConfigProblem, callbackIsSigned, KEY_REFETCH_MIN_MS,
 } from '../src/integrations/payments/azampay.mjs';
 import { createMobileMoneyService } from '../src/services/mobile-money-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
@@ -37,8 +38,8 @@ test('settings: all three credentials needed; sandbox unless live AND the live h
   const s = azampaySettings(base);
   assert.deepEqual([s.appName, s.clientId, s.environment], ['FitFlex', 'cid', 'sandbox']);
   assert.deepEqual(s.hosts, AZAMPAY_SANDBOX_HOSTS);
-  // live without AzamPay's live hosts stays sandbox: no guessed production URLs
-  assert.equal(azampaySettings({ ...base, AZAMPAY_ENV: 'live' }).environment, 'sandbox');
+  // live without AzamPay's live hosts is CLOSED (no settings, no client): never quietly the sandbox
+  assert.equal(azampaySettings({ ...base, AZAMPAY_ENV: 'live' }), null);
   const live = azampaySettings({ ...base, AZAMPAY_ENV: 'live', AZAMPAY_AUTH_URL: 'https://a.live/', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_URL: 'https://d.live' });
   assert.equal(live.environment, 'live');
   assert.equal(live.hosts.auth, 'https://a.live');
@@ -47,6 +48,41 @@ test('settings: all three credentials needed; sandbox unless live AND the live h
   assert.equal(azampaySettings({ ...base, AZAMPAY_CHECKOUT_URL: 'https://mock.test', NODE_ENV: 'production' }).hosts.checkout, AZAMPAY_SANDBOX_HOSTS.checkout);
   assert.equal(azampaySettings({ ...base, AZAMPAY_CHECKOUT_URL: 'https://mock.test' }).hosts.checkout, 'https://mock.test');
   assert.equal(azampaySettings(base).disbursePublicKey, null);
+});
+
+test('AZAMPAY_ENV=live fails closed: incomplete or non-https live hosts give no settings and a named problem; the disbursement host is optional', () => {
+  const base = { AZAMPAY_APP_NAME: 'FitFlex', AZAMPAY_CLIENT_ID: 'cid', AZAMPAY_CLIENT_SECRET: 's', AZAMPAY_ENV: 'live' };
+  const A = { AZAMPAY_AUTH_URL: 'https://auth.live' }; const C = { AZAMPAY_CHECKOUT_URL: 'https://checkout.live' };
+  for (const env of [base, { ...base, ...A }, { ...base, ...C }, { ...base, ...A, AZAMPAY_DISBURSE_URL: 'https://d.live' }]) {
+    assert.equal(azampayConfigProblem(env), 'live_hosts_missing', JSON.stringify(env));
+    assert.equal(azampaySettings(env), null, 'no settings → no client, nothing settles');
+  }
+  for (const env of [
+    { ...base, AZAMPAY_AUTH_URL: 'http://auth.live', ...C }, { ...base, ...A, AZAMPAY_CHECKOUT_URL: 'http://checkout.live' },
+    { ...base, ...A, AZAMPAY_CHECKOUT_URL: 'checkout.live' }, { ...base, ...A, ...C, AZAMPAY_DISBURSE_URL: 'http://d.live' },
+  ]) {
+    assert.equal(azampayConfigProblem(env), 'live_hosts_not_https', JSON.stringify(env));
+    assert.equal(azampaySettings(env), null);
+  }
+  // collections need only the auth and checkout hosts; payouts stay closed without the disbursement host
+  const live = azampaySettings({ ...base, ...A, ...C, AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
+  assert.equal(azampayConfigProblem({ ...base, ...A, ...C }), null);
+  assert.deepEqual([live.environment, live.hosts.auth, live.hosts.checkout, live.hosts.disburse], ['live', 'https://auth.live', 'https://checkout.live', null]);
+  assert.equal(createAzamPayClient({ settings: live }).payoutsConfigured(), false);
+  // the sandbox is unaffected, and a typo is still the sandbox (never live)
+  assert.equal(azampayConfigProblem({ ...base, AZAMPAY_ENV: 'sandbox' }), null);
+  assert.equal(azampayConfigProblem({ ...base, AZAMPAY_ENV: 'Liv' }), null);
+  assert.equal(azampayConfigProblem({}), null);
+});
+
+test('payouts without the disbursement host are refused before any call', async () => {
+  const live = azampaySettings({ AZAMPAY_APP_NAME: 'F', AZAMPAY_CLIENT_ID: 'cid', AZAMPAY_CLIENT_SECRET: 's', AZAMPAY_ENV: 'live', AZAMPAY_AUTH_URL: 'https://a.live', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
+  let calls = 0;
+  const c = createAzamPayClient({ settings: live, fetchFn: async () => { calls += 1; throw new Error('must not be called'); } });
+  await assert.rejects(c.disburse({ source: {}, destination: {}, amountTzs: 1000, externalReferenceId: 'p1', checksumText: 'x' }), (e) => e.code === 'payouts_not_configured');
+  await assert.rejects(c.nameLookup({ bankName: 'Tigo', accountNumber: '1', checksumText: 'x' }), (e) => e.code === 'payouts_not_configured');
+  await assert.rejects(c.payoutStatus({ pgReferenceId: 'pg', bankName: 'Tigo' }), (e) => e.code === 'payouts_not_configured');
+  assert.equal(calls, 0);
 });
 
 test('phone numbers and networks: the member\'s choice wins, else the prefix; AzamPesa only when chosen', () => {
@@ -62,6 +98,9 @@ test('phone numbers and networks: the member\'s choice wins, else the prefix; Az
   assert.equal(networkFor('255754123456', 'mixx'), 'Tigo');
   assert.equal(networkFor('255754123456', 'bitcoin'), null);
   assert.equal(amountToTzs('60000.00'), 60000);
+  // an amount with cents is never rounded into the price asked: unreadable, so the payment is held
+  for (const bad of ['59999.5', '59999.99', '60000.4', '6e4.5', '', ' ', 'abc', '-60000', '0', null, undefined, 'Infinity']) assert.equal(amountToTzs(bad), null, String(bad));
+  assert.deepEqual([amountToTzs('60,000'), amountToTzs(60000), amountToTzs(' 60000 ')], [60000, 60000, 60000]);
   assert.equal(amountToTzs('0'), null);
 });
 
@@ -170,6 +209,53 @@ test('client: verifyCallback checks the signature with AzamPay\'s key, refetchin
   // no key from AzamPay → nothing is believed
   const nokey = createAzamPayClient({ settings: settings(), fetchFn: fakeAzamPay({ keyPem: '' }).fetchFn });
   assert.equal(await nokey.verifyCallback(callback()), false);
+});
+
+test('client: clientId must be PRESENT and ours — a callback without it is refused, whatever its signature', async () => {
+  const f = fakeAzamPay();
+  const c = createAzamPayClient({ settings: settings(), fetchFn: f.fetchFn });
+  const { clientId, ...without } = callback();
+  void clientId;
+  assert.equal(verifyCallbackSignature(without, PUB), true, 'the signature itself is good (clientId is not signed)');
+  for (const body of [without, { ...without, clientId: null }, { ...without, clientId: '' }, { ...without, clientId: 'CID' }, { ...without, clientId: ['cid'] }]) {
+    assert.equal(await c.verifyCallback(body), false, JSON.stringify(body.clientId));
+  }
+  assert.equal(f.calls.length, 0, 'refused before AzamPay is asked for anything');
+  assert.equal(await c.verifyCallback({ ...without, clientId: 'cid' }), true);
+});
+
+test('client: an unverifiable body cannot make the server call AzamPay at will — no fetch without a signature and the signed fields; a forced key refetch at most once per window', async () => {
+  let t = 1_800_000_000_000;
+  const f = fakeAzamPay();
+  const c = createAzamPayClient({ settings: settings(), fetchFn: f.fetchFn, now: () => t });
+  // nothing to verify → nothing fetched (not even the key)
+  for (const junk of [{ clientId: 'cid' }, { ...callback(), signature: '' }, { ...callback(), signature: '   ' }, { ...callback(), signature: 123 }, { ...callback(), utilityref: '' }, { ...callback(), transactionstatus: null }]) {
+    assert.equal(callbackIsSigned(junk), false);
+    assert.equal(await c.verifyCallback(junk), false);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.equal(await c.verifyCallback(callback()), true);
+  assert.equal(f.keys, 1);
+  // forged bodies: the first one forces one refetch, the next ones in the window none
+  const forged = () => ({ ...callback(), transactionstatus: 'failure' });
+  for (let i = 0; i < 25; i += 1) assert.equal(await c.verifyCallback(forged()), false);
+  assert.equal(f.keys, 2, 'one forced refetch, not twenty-five');
+  assert.equal(await c.verifyCallback(callback()), true, 'genuine callbacks still verify meanwhile');
+  t += KEY_REFETCH_MIN_MS - 1000;
+  await c.verifyCallback(forged());
+  assert.equal(f.keys, 2);
+  t += 2000;
+  await c.verifyCallback(forged());
+  assert.equal(f.keys, 3, 'allowed again after the window');
+});
+
+test('client: the callback user and password are compared whole (constant time): a prefix, a longer or an empty value is refused', async () => {
+  const strict = createAzamPayClient({ settings: settings({ callbackUser: 'azam-user', callbackPassword: 'right-secret' }), fetchFn: fakeAzamPay().fetchFn });
+  const ok = { user: 'azam-user', password: 'right-secret' };
+  assert.equal(await strict.verifyCallback(callback(ok)), true);
+  for (const over of [{ password: 'right-secre' }, { password: 'right-secret ' }, { password: 'right-secretX' }, { password: '' }, { password: null }, { password: 'RIGHT-SECRET' }, { user: 'azam-use' }, { user: '' }, { user: 'someone-else' }]) {
+    assert.equal(await strict.verifyCallback(callback({ ...ok, ...over })), false, JSON.stringify(over));
+  }
 });
 
 test('client: payouts stay closed without AzamPay\'s disbursement key; with it the checksum is sent', async () => {

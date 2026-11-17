@@ -3,6 +3,7 @@
 // the widened state machines and nothing wider, the redactor against hostile payloads, the config defaults, the document
 // validation of the new presets, the migration (constraints, partial uniques, `down` failing closed and restoring S3 exactly),
 // and that no route can reach `commitOrder`.
+import './fixtures/azampay-env.mjs';
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -154,24 +155,24 @@ test('the widened state machines allow exactly the S4 moves and nothing else', (
 test('the redactor: allowlist only; hostile payloads (nested objects, long strings, phone numbers, __proto__, huge values) never reach rawRedacted; manual and free store null', () => {
   assert.equal(redactProviderPayload('manual', { status: 'x' }), null);
   assert.equal(redactProviderPayload('free', {}), null);
-  assert.equal(redactProviderPayload('tunzaa', null), null);
-  assert.equal(redactProviderPayload('tunzaa', []), null);
-  assert.equal(redactProviderPayload('tunzaa', { signature: 'x', customer_msisdn: '255712345678' }), null, 'nothing allowlisted → nothing stored');
-  const hostile = JSON.parse('{"transaction_id":"TXN1","status":"COMPLETED","amount":"20000.00","remark":"call +255 712 345 678 or 0712345678 or 255712345678","reference_id":{"a":1},"payment_date":["x"],"timestamp":null,"__proto__":{"polluted":1},"constructor":{"prototype":{"x":1}},"x-signature":"abc","msisdn":"255712345678","token":"t"}');
-  const out = redactProviderPayload('tunzaa', hostile);
-  assert.deepEqual(Object.keys(out).sort(), ['amount', 'provider', 'remark', 'status', 'transaction_id']);
-  assert.equal(out.remark, 'call ***678 or ***678 or ***678');
+  assert.equal(redactProviderPayload('tunzaa', { transaction_id: 'TXN1', status: 'COMPLETED' }), null, 'a provider without an allowlist stores nothing');
+  assert.equal(redactProviderPayload('azampay', null), null);
+  assert.equal(redactProviderPayload('azampay', []), null);
+  assert.equal(redactProviderPayload('azampay', { signature: 'x', msisdn: '255712345678', password: 'p', user: 'u', clientId: 'c' }), null, 'nothing allowlisted → nothing stored');
+  const hostile = JSON.parse('{"transid":"TXN1","transactionstatus":"success","amount":"20000","message":"call +255 712 345 678 or 0712345678 or 255712345678","utilityref":{"a":1},"reference":["x"],"mnoreference":null,"msisdn":"255712345678","signature":"sig","__proto__":{"polluted":1},"constructor":{"prototype":{"polluted":1}}}');
+  const out = redactProviderPayload('azampay', hostile);
+  assert.deepEqual(Object.keys(out).sort(), ['amount', 'message', 'provider', 'transactionstatus', 'transid']);
+  assert.equal(out.message, 'call ***678 or ***678 or ***678');
   assert.equal(({}).polluted, undefined);
-  assert.equal(redactProviderPayload('tunzaa', { transactionID: 'TXN9', status: 'COMPLETED' }).transaction_id, 'TXN9', 'the status read spells it transactionID');
-  assert.equal(redactProviderPayload('tunzaa', { status: 'COMPLETED', remark: 'x'.repeat(5000) }).remark.length, 200);
-  assert.equal(redactProviderPayload('tunzaa', { status: 'x'.repeat(5000), remark: 'y' }), null, 'over 2 KB: dropped entirely');
-  assert.equal(redactProviderPayload('tunzaa', { status: 'COMPLETED', amount: Infinity }).amount, undefined);
-  assert.equal(redactProviderPayload('tunzaa', { status: 'COMPLETED', amount: 20000 }).amount, 20000);
-  assert.equal(redactProviderPayload('tunzaa', { status: 'COMPLETED', payment_date: '2026-10-14 10:00:00' }).payment_date, '2026-10-14 10:00:00', 'dates survive');
+  assert.equal(redactProviderPayload('azampay', { transactionstatus: 'success', message: 'x'.repeat(5000) }).message.length, 200);
+  assert.equal(redactProviderPayload('azampay', { transactionstatus: 'x'.repeat(5000), message: 'y' }), null, 'over 2 KB: dropped entirely');
+  assert.equal(redactProviderPayload('azampay', { transactionstatus: 'success', amount: Infinity }).amount, undefined);
+  assert.equal(redactProviderPayload('azampay', { transactionstatus: 'success', amount: 20000 }).amount, 20000);
+  assert.equal(redactProviderPayload('azampay', { transactionstatus: 'success', utilityref: 'pay_ab12cd34.lq2x' }).utilityref, 'pay_ab12cd34.lq2x', 'our reference survives');
   // random fuzz: no digit run of 9+ ever survives in any value
   for (let i = 0; i < 200; i += 1) {
     const junk = Array.from({ length: 30 }, () => String.fromCharCode(32 + Math.floor(Math.random() * 90))).join('') + String(Math.floor(Math.random() * 1e12)).padStart(12, '0');
-    const r = redactProviderPayload('tunzaa', { status: 'COMPLETED', remark: junk, transaction_id: junk });
+    const r = redactProviderPayload('azampay', { transactionstatus: 'success', message: junk, transid: junk });
     assert.ok(!/\d{9,}/.test(JSON.stringify(r)), JSON.stringify(r));
   }
 });
@@ -179,7 +180,7 @@ test('the redactor: allowlist only; hostile payloads (nested objects, long strin
 test('views and config: payment state vocabulary, masked phone, refund view hides the payout reference until paid; config defaults and bounds', () => {
   const state = (status, extra = {}) => paymentStateOf({ status, method: 'manual', provider: 'manual', ...extra });
   assert.deepEqual(['succeeded', 'pending', 'created', 'expired', 'reconciliation_required', 'cancelled', 'failed'].map(s => state(s)), ['confirmed', 'submitted', 'none', 'expired', 'needs_attention', 'failed', 'failed']);
-  assert.equal(state('pending', { method: 'provider', provider: 'tunzaa' }), 'processing');
+  assert.equal(state('pending', { method: 'provider', provider: 'azampay' }), 'processing');
   assert.equal(state('failed', { rejectCode: 'wrong_account' }), 'rejected');
   assert.equal(state('failed', { failureReason: 'rejected:other' }), 'rejected');
   assert.equal(state('failed', { failureReason: 'refunded_after_late_payment' }), 'needs_attention');

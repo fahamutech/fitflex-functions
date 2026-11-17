@@ -17,7 +17,7 @@
 // confirmation of a member's payment. That is why the callback's RSA signature
 // is checked against AzamPay's own public key, and its amount, our reference and
 // the transaction are all checked again before anything is approved.
-import { createVerify, createHash, publicEncrypt, constants as cryptoConstants } from 'node:crypto';
+import { createVerify, createHash, publicEncrypt, timingSafeEqual, constants as cryptoConstants } from 'node:crypto';
 
 /** Sandbox hosts, as published in the developer docs. Live hosts are given by AzamPay after KYC approval. */
 export const AZAMPAY_SANDBOX_HOSTS = Object.freeze({
@@ -38,13 +38,35 @@ const first = (env, names) => {
   return '';
 };
 
+const isHttps = (u) => /^https:\/\/[^\s/]+/i.test(String(u));
+
 /**
- * AzamPay's settings from the environment, or null when a credential is missing.
+ * Why AzamPay cannot be used although its credentials are set, or null. AZAMPAY_ENV=live is a
+ * promise that real money is taken: it is never quietly turned into the sandbox (which, with
+ * AZAMPAY_SANDBOX_SETTLES on, would activate plans for sandbox money). Live needs the auth and
+ * checkout hosts AzamPay gives after KYC approval, each https://; the disbursement host is for
+ * payouts only (optional; https:// when given).
+ *   'live_hosts_missing' | 'live_hosts_not_https' | null
+ */
+export function azampayConfigProblem(env = process.env) {
+  if (first(env, ['AZAMPAY_ENV']).toLowerCase() !== 'live') return null;
+  const auth = first(env, ['AZAMPAY_AUTH_URL']);
+  const checkout = first(env, ['AZAMPAY_CHECKOUT_URL']);
+  const disburse = first(env, ['AZAMPAY_DISBURSE_URL']);
+  if (!auth || !checkout) return 'live_hosts_missing';
+  if (!isHttps(auth) || !isHttps(checkout) || (disburse && !isHttps(disburse))) return 'live_hosts_not_https';
+  return null;
+}
+
+/**
+ * AzamPay's settings from the environment, or null when a credential is missing
+ * or the live configuration is incomplete (see azampayConfigProblem): fail closed.
  *
  * `environment` is 'sandbox' unless AZAMPAY_ENV is exactly 'live': a typo can
- * never send real money. Live needs all three hosts set explicitly
- * (AZAMPAY_AUTH_URL, AZAMPAY_CHECKOUT_URL, AZAMPAY_DISBURSE_URL), as AzamPay
- * gives them after KYC approval; without them the settings fall back to sandbox.
+ * never send real money. Live needs AZAMPAY_AUTH_URL and AZAMPAY_CHECKOUT_URL set
+ * explicitly (https://), as AzamPay gives them after KYC approval; without them
+ * there are NO settings (no client, nothing settles). AZAMPAY_DISBURSE_URL is for
+ * payouts only: without it collections work and payouts stay closed.
  * In sandbox the hosts may be pointed at a mock, except when NODE_ENV=production.
  */
 export function azampaySettings(env = process.env) {
@@ -52,14 +74,13 @@ export function azampaySettings(env = process.env) {
   const clientId = first(env, ['AZAMPAY_CLIENT_ID']);
   const clientSecret = first(env, ['AZAMPAY_CLIENT_SECRET']);
   if (!appName || !clientId || !clientSecret) return null;
+  if (azampayConfigProblem(env)) return null;
   const hostsFromEnv = {
     auth: first(env, ['AZAMPAY_AUTH_URL']),
     checkout: first(env, ['AZAMPAY_CHECKOUT_URL']),
     disburse: first(env, ['AZAMPAY_DISBURSE_URL']),
   };
-  const liveHostsGiven = Boolean(hostsFromEnv.auth && hostsFromEnv.checkout && hostsFromEnv.disburse);
-  const wantsLive = first(env, ['AZAMPAY_ENV']).toLowerCase() === 'live';
-  const environment = wantsLive && liveHostsGiven ? 'live' : 'sandbox';
+  const environment = first(env, ['AZAMPAY_ENV']).toLowerCase() === 'live' ? 'live' : 'sandbox';
   let hosts;
   if (environment === 'live') hosts = hostsFromEnv;
   else if (env.NODE_ENV === 'production') hosts = { ...AZAMPAY_SANDBOX_HOSTS };
@@ -68,7 +89,7 @@ export function azampaySettings(env = process.env) {
     checkout: hostsFromEnv.checkout || AZAMPAY_SANDBOX_HOSTS.checkout,
     disburse: hostsFromEnv.disburse || AZAMPAY_SANDBOX_HOSTS.disburse,
   };
-  const strip = (u) => String(u).replace(/\/+$/, '');
+  const strip = (u) => (u ? String(u).replace(/\/+$/, '') : null);
   return {
     appName, clientId, clientSecret,
     // Some AzamPay apps also issue an API key, sent as X-API-Key on checkout calls.
@@ -120,15 +141,31 @@ export function networkFor(msisdn, chosen = null) {
   return m ? (PREFIX_NETWORK[m[1]] ?? null) : null;
 }
 
-/** Whole shillings from an amount like "60000" or "60000.00", or null. */
+/**
+ * Whole shillings from an amount like "60000" or "60000.00", or null. An amount with
+ * cents ("59999.5") is not rounded into the price asked: it is unreadable (null), so held.
+ */
 export function amountToTzs(raw) {
-  const n = Number(String(raw ?? '').replace(/,/g, ''));
-  return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
+  const text = String(raw ?? '').replace(/,/g, '').trim();
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /** The text AzamPay signs on a checkout callback. */
 export const callbackSignedText = (p) =>
   `${p?.utilityref ?? ''}${p?.externalreference ?? ''}${p?.transactionstatus ?? ''}${p?.operator ?? ''}`;
+
+/** Does the callback carry everything a signature check needs (the signature and the signed fields we require)? */
+export const callbackIsSigned = (payload) => Boolean(payload && typeof payload === 'object'
+  && typeof payload.signature === 'string' && payload.signature.trim() && payload.utilityref && payload.transactionstatus);
+
+/** Equal strings, compared in constant time (callback user / password). */
+function sameSecret(given, expected) {
+  const a = Buffer.from(String(given ?? ''), 'utf8');
+  const b = Buffer.from(String(expected), 'utf8');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
 
 /** Is `signatureB64` AzamPay's RSA-SHA256 (PKCS#1 v1.5) signature of this callback under `publicKeyPem`? */
 export function verifyCallbackSignature(payload, publicKeyPem) {
@@ -210,6 +247,8 @@ export class AzamPayError extends Error {
 }
 
 const KEY_TTL_MS = 24 * 60 * 60_000;
+/** A signature that does not verify makes us fetch AzamPay's key again (it may have rotated) at most this often. */
+export const KEY_REFETCH_MIN_MS = 5 * 60_000;
 
 /**
  * A client for one set of settings. `fetchFn` and `now` are injectable for tests.
@@ -219,6 +258,7 @@ const KEY_TTL_MS = 24 * 60 * 60_000;
 export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now = () => Date.now(), timeoutMs = 15_000 } = {}) {
   let cachedToken = null;
   let cachedKey = null;
+  let lastForcedKeyAt = null;
 
   async function call(method, url, { body, token, apiKey = false } = {}) {
     const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
@@ -272,6 +312,7 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
   }
 
   function disburseKey() {
+    if (!settings.hosts.disburse) throw new AzamPayError('Payouts need AZAMPAY_DISBURSE_URL', { code: 'payouts_not_configured', status: 503 });
     if (!settings.disbursePublicKey) throw new AzamPayError('Payouts need AZAMPAY_DISBURSE_PUBLIC_KEY', { code: 'payouts_not_configured', status: 503 });
     return settings.disbursePublicKey;
   }
@@ -299,24 +340,30 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
     },
 
     /**
-     * Is this callback really from AzamPay? Checks the RSA signature with AzamPay's
-     * public key (fetched again once if it does not verify, in case the key rotated),
-     * and, when configured, the user / password / clientId AzamPay sends along.
+     * Is this callback really from AzamPay? `clientId` must be present and ours, the
+     * user / password must match when configured (constant time), and the RSA signature
+     * must verify with AzamPay's public key. When it does not verify the key is fetched
+     * again in case it rotated — but only for a body that carries a signature and the
+     * signed fields, and at most once every KEY_REFETCH_MIN_MS, so junk posted to the
+     * route cannot make this server call AzamPay at will.
      */
     async verifyCallback(payload) {
       if (!payload || typeof payload !== 'object') return false;
-      if (payload.clientId != null && String(payload.clientId) !== settings.clientId) return false;
-      if (settings.callbackUser && String(payload.user ?? '') !== settings.callbackUser) return false;
-      if (settings.callbackPassword && String(payload.password ?? '') !== settings.callbackPassword) return false;
+      if (typeof payload.clientId !== 'string' || payload.clientId !== settings.clientId) return false;
+      if (settings.callbackUser && !sameSecret(payload.user, settings.callbackUser)) return false;
+      if (settings.callbackPassword && !sameSecret(payload.password, settings.callbackPassword)) return false;
+      if (!callbackIsSigned(payload)) return false;
       let key;
       try { key = await publicKey(); } catch { return false; }
       if (verifyCallbackSignature(payload, key)) return true;
+      if (lastForcedKeyAt !== null && now() - lastForcedKeyAt < KEY_REFETCH_MIN_MS) return false;
+      lastForcedKeyAt = now();
       try { key = await publicKey(true); } catch { return false; }
       return verifyCallbackSignature(payload, key);
     },
 
     // ── payouts (disbursement) ────────────────────────────────────────────
-    payoutsConfigured: () => Boolean(settings.disbursePublicKey),
+    payoutsConfigured: () => Boolean(settings.disbursePublicKey && settings.hosts.disburse),
 
     /** The name on a wallet or bank account, before paying it. */
     async nameLookup({ bankName, accountNumber, checksumText }) {
@@ -345,6 +392,7 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
 
     /** A payout's state, by AzamPay's reference and the network used. */
     async payoutStatus({ pgReferenceId, bankName }) {
+      if (!settings.hosts.disburse) throw new AzamPayError('Payouts need AZAMPAY_DISBURSE_URL', { code: 'payouts_not_configured', status: 503 });
       const q = new URLSearchParams({ pgReferenceId: String(pgReferenceId), bankName: String(bankName) });
       return authed((t) => call('GET', `${settings.hosts.disburse}/api/v1/azampay/transactionstatus?${q}`, { token: t }));
     },

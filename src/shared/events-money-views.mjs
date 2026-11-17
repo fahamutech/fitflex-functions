@@ -44,7 +44,7 @@ export function paymentStateOf(payment) {
   if (!payment) return 'none';
   switch (payment.status) {
     case 'succeeded': return 'confirmed';
-    case 'pending': return payment.method === 'provider' || payment.provider === 'tunzaa' ? 'processing' : 'submitted';
+    case 'pending': return payment.method === 'provider' || payment.provider === 'azampay' ? 'processing' : 'submitted';
     case 'created': return 'none';
     case 'expired': return 'expired';
     case 'reconciliation_required': return 'needs_attention';

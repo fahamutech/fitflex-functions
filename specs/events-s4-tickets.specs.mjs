@@ -1,27 +1,28 @@
 // Marathon & running events · S4 — tickets (spec §3.8): one active ticket per confirmed place, the token DERIVED from
 // EVENT_TICKET_SECRET and never stored, hash at rest, static code, rotation, revocation, who may see which ticket
 // (including the purchaser losing access at the moment someone else claims), no-store, integrity.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
 import { createEventOrder, quoteEventOrder, claimEventRegistration, getMyEventRegistration, getMyEventOrder, resetEventsRegistrationLimits } from '../functions/events-registration.mjs';
 import { payForEventOrder, listMyEventTickets, getEventTicket, rotateEventTicket, resetEventsPaymentLimits } from '../functions/events-payments.mjs';
 import { adminDecidePaymentRequest } from '../functions/admin-payments.mjs';
-import { harness, s4On, s4Off, saveManualDetails, clearManualDetails, txId, uid, phone, TICKET_SECRET } from './fixtures/events-s4.mjs';
+import { harness, s4On, s4Off, txId, uid, phone, TICKET_SECRET } from './fixtures/events-s4.mjs';
 import { deriveToken, verifyToken, parseToken, ticketKeyRing, sha256hex, QR_PREFIX } from '../src/shared/events-ticket-token.mjs';
 
 await ensureInit();
 const h = harness();
 const { db, call } = h;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const key = () => `tk_${uid('').slice(1)}`;
 const member = async () => { const p = phone(); const sub = await h.user({ phone: p }); return { claims: h.claimsOf(sub), sub, phone: p }; };
 
 /** A paid, confirmed order of two places: place 0 is the buyer's own, place 1 is for a friend with a phone. */
 async function paidOrder() {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await h.sellingEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'Early', priceTzs: 20000, capacity: 10 }] }] });
   const b = await member();
   const friendPhone = phone();
@@ -35,7 +36,7 @@ async function paidOrder() {
   const q = await call(quoteEventOrder, b.claims, { body });
   const o = await call(createEventOrder, b.claims, { headers: { 'Idempotency-Key': key() }, body: { ...body, expectedTotalTzs: q.body.quote.totalTzs } });
   assert.equal(o.status, 201, JSON.stringify(o.body));
-  const p = await call(payForEventOrder, b.claims, { params: { id: o.body.order.id }, headers: { 'Idempotency-Key': key() }, body: { reference: txId(), payerPhone: b.phone } });
+  const p = await call(payForEventOrder, b.claims, { params: { id: o.body.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
   assert.equal(p.status, 201, JSON.stringify(p.body));
   const admin = h.claimsOf(await h.user({ userType: 'admin' }), 'admin');
   const request = await db('PaymentRequest').where({ eventOrderId: o.body.order.id }).first();

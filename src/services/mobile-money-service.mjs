@@ -1,44 +1,50 @@
-// Mobile-money payment of a payment request (Malipo by Tunzaa or AzamPay).
-// One instance per provider (`provider` = 'tunzaa' | 'azampay'); bootstrap picks which
-// one takes new payments (AZAMPAY_PAYMENTS replaces Tunzaa) and routes refreshes and
-// callbacks to the provider a request was sent through.
+// Mobile-money payment of a payment request through AzamPay, the only payment
+// provider (owner decision 2026-11-17).
 //
-// A payment request is created as before (pass, upgrade, gym plan; with
-// TUNZAA_TRAINER_PRODUCTS also trainer sessions and a trainer's gym pass). "Pay now"
-// asks the payer's phone to approve exactly that request's amount; when the
-// provider confirms, the request is approved through the SAME path an admin
-// uses (adminPaymentService.decide), so every product, including pass
-// upgrades, is settled by one piece of code.
+// A payment request is created as before (pass, upgrade, gym plan, custom gym
+// pass; with AZAMPAY_TRAINER_PRODUCTS also trainer sessions and a trainer's gym
+// pass; with EVENTS_PAYMENTS_AZAMPAY an event order; with AZAMPAY_SHOP_ORDERS a
+// member's shop order). "Pay now" asks the payer's phone to approve exactly that
+// request's amount; when AzamPay confirms, the request is approved through the
+// SAME path an admin uses (adminPaymentService.decide), so every product,
+// including pass upgrades, is settled by one piece of code.
 //
 //   pending (provider admin_approved)
-//      ── pay ──▶ pending (provider tunzaa, reference = 'pending:<ms>')   claimed, call going out
-//      ── sent ──▶ pending (provider tunzaa, reference = transaction id)  prompt on the phone
-//      ── COMPLETED ──▶ approved       ── FAILED ──▶ pending again (member may retry)
+//      ── pay ──▶ pending (provider azampay, reference = 'pending:<ms>')   claimed, call going out
+//      ── sent ──▶ pending (provider azampay, reference = transaction id, promptedAt)  prompt on the phone
+//      ── success ──▶ approved       ── failure ──▶ pending again (member may retry)
+//      ── no answer for PROMPT_TTL_MS ──▶ the member may ask for a new prompt
 //
-// Nothing the callback says is taken on trust: with Tunzaa a COMPLETED callback
-// is only a trigger, and the transaction's status and amount are read back from
-// Tunzaa before the request is approved. AzamPay offers no status query for
-// collections: its callback is verified by RSA signature against AzamPay's own
-// public key (by the route), and the client says so (`confirmsByCallback`); the
-// amount, the transaction and its single use are then checked here the same way. A callback is tied to its request by OUR
-// reference (reference_id = "<request id>.<attempt>"), which only a signed
-// callback from Tunzaa can carry, so a prompt whose answer was lost (timeout)
+// AzamPay offers no status query for collections: its callback is verified by
+// RSA signature against AzamPay's own public key (by the route), and nothing
+// else the callback says is taken on trust: the amount, the transaction and its
+// single use are checked here before anything is approved. A callback is tied
+// to its request by OUR reference ("<request id>.<attempt>", sent as externalId
+// and signed back as utilityref), so a prompt whose answer was lost (timeout)
 // still settles the right request.
+//
+// Money that cannot be matched is never approved and never dropped: it is
+// written to the audit log (`payment_mobile_money_held`,
+// `payment_mobile_money_amount_mismatch`, `payment_mobile_money_orphaned`) and
+// raised as an ops exception (`onHeld`; event orders raise their own), and staff
+// settle it with the usual approve / reject / refund tools.
+//
+// A prompt that was given up (failed, or unanswered and retried) leaves its
+// transaction id in `supersededReferences`: a success that names it later is
+// held, even in the moment a new prompt is being sent and `reference` is only
+// a claim placeholder.
 import { randomUUID } from 'node:crypto';
-import { toMsisdn, maybeSent } from '../integrations/payments/tunzaa.mjs';
+import { toMsisdn, maybeSent } from '../integrations/payments/azampay.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
 import {
-  MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, claimAge, mobileMoneyInFlight,
+  MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, mobileMoneyInFlight,
 } from '../shared/mobile-money-claim.mjs';
 
 const MANUAL = 'admin_approved';
 /** Products paid this way: FitFlex Pass (incl. upgrades) and a gym's own plans. */
 const BASE_PAYABLE = Object.freeze([PRODUCT_TYPES.FITFLEX_PASS, PRODUCT_TYPES.GYM_SUBSCRIPTION]);
-/**
- * B6a (TUNZAA_TRAINER_PRODUCTS): trainer products too. SHOP_ORDER is never paid
- * this way (marketplace D-9: manual only).
- */
+/** B6a (AZAMPAY_TRAINER_PRODUCTS): trainer products too. */
 const TRAINER_PAYABLE = Object.freeze([PRODUCT_TYPES.TRAINER_SERVICE, PRODUCT_TYPES.TRAINER_GYM_PASS]);
 /**
  * Which caller role pays which product (B6a). A trainer pays only their own
@@ -49,40 +55,50 @@ const ROLE_PRODUCTS = Object.freeze({
   member: Object.freeze([...BASE_PAYABLE, PRODUCT_TYPES.TRAINER_SERVICE]),
   trainer: Object.freeze([PRODUCT_TYPES.TRAINER_GYM_PASS]),
 });
+/** Products that are a member's own purchase whatever the trainer flag says (each behind its own switch). */
+const MEMBER_ONLY = Object.freeze([PRODUCT_TYPES.EVENT_ORDER, PRODUCT_TYPES.SHOP_ORDER]);
 /** Mobile money is in Tanzanian shillings only. */
 const CURRENCY = 'TZS';
 const PLACEHOLDER = CLAIM_PLACEHOLDER;
 /** At most this many prompts per member / per phone in the window. */
 const LIMITS = { member: 5, phone: 3, windowMs: 10 * 60_000 };
 
-/** Our reference for one attempt: "<request id>.<attempt>" (Tunzaa may require it to be unique). */
+/** At most this many given-up transaction ids are remembered per request (the newest). */
+const SUPERSEDED_MAX = 10;
+
+/** Our reference for one attempt: "<request id>.<attempt>" (unique per prompt). */
 const referenceFor = (requestId, now) => `${requestId}.${now.toString(36)}`;
 /** The request id inside a reference (or the id itself). */
 export const requestIdOf = (referenceId) => String(referenceId ?? '').split('.')[0];
 
 export function createMobileMoneyService({
   paymentRequests, subscriptions, adminPaymentService, auditLog,
-  client = null,           // null while the provider's credentials are not set
-  provider = MOBILE_MONEY_PROVIDER, // 'tunzaa' (default) | 'azampay': written on the request and the audit actor
-  enabled = () => false,   // the TUNZAA_PAYMENTS flag
+  client = null,           // null while AzamPay's credentials are not set
+  provider = MOBILE_MONEY_PROVIDER, // 'azampay': written on the request and the audit actor
+  enabled = () => false,   // the AZAMPAY_PAYMENTS flag
   canSettle = () => true,  // false against the sandbox unless opted into
-  scenario = null,         // sandbox only: 'success' | 'failure'
   now = () => Date.now(),
   // (tierKey) → boolean: may this FitFlex Pass tier be sold today (Settings)?
   // A pass or upgrade request for a tier that is no longer sold is not sent
   // to the phone. Wired to settingsService.isTierSellable in bootstrap.
   tierSellable = null,
-  // B6a: the TUNZAA_TRAINER_PRODUCTS flag (effective only with TUNZAA_PAYMENTS). Read on every call.
+  // B6a: the AZAMPAY_TRAINER_PRODUCTS flag (effective only with AZAMPAY_PAYMENTS). Read on every call.
   trainerProducts = () => false,
   // B6a (B1 security review): (request) → null | { error, status, bookingIds } before a
   // prompt goes out for a trainer booking group (trainerBookingService.checkGroupPayment).
   // Not wired: trainer sessions are not payable this way (fail closed).
   beforeBookingPayment = null,
-  // Marathon & Events S4 (EVENTS_PAYMENTS_TUNZAA; built dormant). Absent / disabled: EVENT_ORDER is not payable this way and
+  // Marathon & Events S4 (EVENTS_PAYMENTS_AZAMPAY). Absent / disabled: EVENT_ORDER is not payable this way and
   // every other branch is untouched. { enabled(), beforePrompt(request), afterPrompt(request, txn), onHeld(request, reason, detail), onFailed(request, remark) }
   eventOrders = null,
+  // Shop orders (AZAMPAY_SHOP_ORDERS). Absent / disabled: SHOP_ORDER is not payable this way.
+  // { enabled(), beforePrompt(request) → null | { error, status, … } }
+  shopOrders = null,
   // Callbacks already fully processed: { has(id) → bool, mark(id) } (WebhookSeen). Used for event requests only.
   webhookSeen = null,
+  // Confirmed money that was not approved, for a request that is NOT an event order (those go to eventOrders.onHeld):
+  // (request, reason, { transactionId, amountTzs }) → void. Wired to an ops exception in bootstrap. Best-effort.
+  onHeld = null,
 }) {
   const PROVIDER = provider;
   const ACTOR = provider;
@@ -103,15 +119,37 @@ export function createMobileMoneyService({
     return true;
   }
 
+  /** Tell staff about confirmed money that was not approved. `eventDetail` goes to the event hook only. */
+  async function tellStaff(request, reason, detail, eventDetail = {}) {
+    // An event order's hook also moves its payment to reconciliation: a failure there must surface (AzamPay retries).
+    if (request.eventOrderId) return eventOrders?.onHeld?.(request, reason, { transactionId: detail.transactionId, ...eventDetail });
+    try {
+      await onHeld?.(request, reason, detail);
+    } catch (err) {
+      console.warn('[mobile-money] staff were not told about held money:', request.id, reason, err?.message);
+    }
+  }
+
+  /** The transaction ids of this request's earlier prompts that were given up. */
+  const supersededOf = (r) => (Array.isArray(r?.supersededReferences) ? r.supersededReferences.filter((x) => typeof x === 'string') : []);
+  /** The same list with `ref` added when it is a real transaction id (never a claim placeholder). */
+  const supersededWith = (r, ref) => {
+    const list = supersededOf(r);
+    if (!ref || isClaimPlaceholder(ref) || list.includes(ref)) return list;
+    return [...list, ref].slice(-SUPERSEDED_MAX);
+  };
+
   const isOn = () => Boolean(enabled() && client && canSettle());
   const roleOf = (role) => (role === 'trainer' ? 'trainer' : 'member');
 
   const eventsOn = () => Boolean(eventOrders?.enabled?.());
+  const shopOn = () => Boolean(shopOrders?.enabled?.());
 
   /** The products payable this way right now, whoever pays. */
   function payable() {
     const set = new Set(BASE_PAYABLE);
     if (eventsOn()) set.add(PRODUCT_TYPES.EVENT_ORDER);
+    if (shopOn()) set.add(PRODUCT_TYPES.SHOP_ORDER);
     if (trainerProducts()) {
       for (const p of TRAINER_PAYABLE) if (p !== PRODUCT_TYPES.TRAINER_SERVICE || beforeBookingPayment) set.add(p);
     }
@@ -120,8 +158,8 @@ export function createMobileMoneyService({
 
   /** May this caller role pay this product this way? Without B6a only members reach here. */
   const roleMayPay = (role, product) => {
-    // An event order is a member's purchase, never a trainer's or an organisation's.
-    if (product === PRODUCT_TYPES.EVENT_ORDER) return roleOf(role) === 'member';
+    // An event order or a shop order is a member's purchase here, never a trainer's or an organisation's.
+    if (MEMBER_ONLY.includes(product)) return roleOf(role) === 'member';
     return !trainerProducts() || ROLE_PRODUCTS[roleOf(role)].includes(product);
   };
 
@@ -140,8 +178,8 @@ export function createMobileMoneyService({
     if (role === 'trainer' && !trainerProducts()) return [];
     const set = payable();
     const list = (trainerProducts() ? ROLE_PRODUCTS[role] : BASE_PAYABLE).filter((p) => set.has(p));
-    // S4: members may also pay an event order while the Tunzaa event flag is effective.
-    return role === 'member' && eventsOn() ? [...list, PRODUCT_TYPES.EVENT_ORDER] : list;
+    // Members may also pay an event order / a shop order while that switch is effective.
+    return role === 'member' ? [...list, ...MEMBER_ONLY.filter((p) => set.has(p))] : list;
   }
 
   async function productOf(request) {
@@ -150,13 +188,12 @@ export function createMobileMoneyService({
   }
 
   const isPlaceholder = isClaimPlaceholder;
-  const placeholderAge = (ref) => claimAge(ref, now());
-  /** A prompt is out, or a call to send one is under way and recent. */
+  /** A prompt is out and recent, or a call to send one is under way and recent. */
   const inFlight = (r) => r?.provider === PROVIDER && mobileMoneyInFlight(r, now());
 
   /**
    * Has this transaction already confirmed another approved payment? Checked on every
-   * settlement, whatever MONEY_SECOND_APPROVER / MANUAL_PAY_INSTRUCTIONS say (B6a review).
+   * settlement, whatever MONEY_SECOND_APPROVER says (B6a review).
    */
   async function transactionUsedElsewhere(request, txn) {
     const same = typeof paymentRequests.filterByColumnAsync === 'function'
@@ -188,7 +225,8 @@ export function createMobileMoneyService({
     if (own.error) return own.error;
     const { request } = own;
     if (request.status !== 'pending') return fail('payment_not_pending', 409);
-    // The member says they paid the Lipa Namba already (slice A3): a prompt now would charge twice.
+    // A request that carries a transaction ID someone typed (an organisation's payment notice, or a
+    // payment made by hand before 2026-11-17) is checked by staff: a prompt now would charge twice.
     if (request.memberReference) return fail('manual_payment_submitted', 409);
     const product = await productOf(request);
     if (!payable().has(product)) return fail('not_payable_this_way', 409);
@@ -198,6 +236,11 @@ export function createMobileMoneyService({
     // S4: an event order is prompted only while its hold stands, the event is open and every amount agrees (the order's own).
     if (product === PRODUCT_TYPES.EVENT_ORDER) {
       const problem = await eventOrders.beforePrompt(request);
+      if (problem?.error) return fail(problem.error, problem.status || 409, problem.expectedTzs != null ? { expectedTzs: problem.expectedTzs } : {});
+    }
+    // A shop order is prompted only while it still waits for this payment, in this amount, by this buyer.
+    if (product === PRODUCT_TYPES.SHOP_ORDER) {
+      const problem = await shopOrders.beforePrompt(request);
       if (problem?.error) return fail(problem.error, problem.status || 409, problem.expectedTzs != null ? { expectedTzs: problem.expectedTzs } : {});
     }
     // Owner decision 2026-10-19: a tier not configured in Settings is not sold,
@@ -223,23 +266,37 @@ export function createMobileMoneyService({
     }
 
     // Claim the request before calling out, so a double tap sends one prompt.
-    // A claim that never came back (stale placeholder) is taken over.
+    // A claim that never came back (stale placeholder), or a prompt whose answer never
+    // came (PROMPT_TTL_MS), is taken over: only one of two racing takers wins.
     const claim = `${PLACEHOLDER}${now()}`;
-    const stale = request.provider === PROVIDER && isPlaceholder(request.reference) ? request.reference : null;
+    const stale = request.provider === PROVIDER && request.reference ? request.reference : null;
+    // The prompt that is given up keeps its transaction id on the request (supersededReferences), so its late
+    // success is recognised even while `reference` is only this claim.
     const claimed = stale
-      ? await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: stale }, { reference: claim })
-      : await updateIf(paymentRequests, request.id, { status: 'pending', provider: MANUAL }, { provider: PROVIDER, reference: claim });
+      ? await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: stale }, { reference: claim, promptedAt: null, supersededReferences: supersededWith(request, stale) })
+      : await updateIf(paymentRequests, request.id, { status: 'pending', provider: MANUAL }, { provider: PROVIDER, reference: claim, promptedAt: null });
     if (!claimed) {
       const now_ = (await paymentRequests.findByIdAsync(request.id)) ?? request;
       return { status: 200, state: 'in_progress', paymentRequest: view(now_), alreadyRequested: true };
+    }
+    // Read again after the claim: a callback may have settled or closed the request between the first read
+    // and the claim. Nothing is sent to a phone unless the request is still pending on THIS claim.
+    const fresh = await paymentRequests.findByIdAsync(request.id);
+    if (!fresh || fresh.status !== 'pending' || fresh.provider !== PROVIDER || fresh.reference !== claim) {
+      const settled = fresh?.status === 'approved';
+      return { status: 200, state: settled ? 'completed' : 'in_progress', paymentRequest: view(fresh ?? request), alreadyRequested: true };
+    }
+    // The old prompt is named in the audit: a success that still arrives for it is held for staff, who find it here.
+    if (stale && !isPlaceholder(stale)) {
+      await audit('payment_mobile_money_prompt_expired', request.id, { reference: stale, promptedAt: request.promptedAt ?? null }, { retried: true });
     }
 
     let transactionId;
     try {
       // The amount is the request's own, never one the app sent.
       ({ transactionId } = await client.initiatePayment({
-        msisdn, amountTzs: request.amountTzs, reference: referenceFor(request.id, now()), scenario,
-        // AzamPay needs the wallet (Mpesa, Tigo, Airtel, Halopesa, Azampesa); Tunzaa ignores it.
+        msisdn, amountTzs: request.amountTzs, reference: referenceFor(request.id, now()),
+        // The wallet paid from (Mpesa, Tigo, Airtel, Halopesa, Azampesa); else taken from the number.
         network,
       }));
     } catch (err) {
@@ -256,7 +313,17 @@ export function createMobileMoneyService({
       return fail('provider_unavailable', 503);
     }
     try {
-      const updated = await paymentRequests.updateByIdAsync(request.id, { provider: PROVIDER, reference: transactionId });
+      // Recorded only on the claim this call made: a callback that already settled the request
+      // (AzamPay can answer before its own checkout call returns) is never written over.
+      const updated = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: claim }, { reference: transactionId, promptedAt: new Date(now()).toISOString() });
+      if (!updated) {
+        const latest = (await paymentRequests.findByIdAsync(request.id)) ?? request;
+        const settled = latest.status === 'approved';
+        if (!(settled && latest.reference === transactionId)) {
+          await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: 'request_changed', status: latest.status });
+        }
+        return { status: settled ? 200 : 202, state: settled ? 'completed' : 'in_progress', paymentRequest: view(latest) };
+      }
       await audit('payment_mobile_money_requested', request.id, null, { transactionId, amountTzs: request.amountTzs });
       // S4: the event payment becomes pending with the provider's transaction, and the hold is extended a little.
       if (request.eventOrderId) {
@@ -270,76 +337,92 @@ export function createMobileMoneyService({
     }
   }
 
-  /** Put an attempt back so the member can try again (or pay another way). */
+  /** Put an attempt back so the member can try again. */
   async function release(request, why) {
-    const back = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: request.reference ?? null }, { provider: MANUAL, reference: null });
+    const back = await updateIf(paymentRequests, request.id, { status: 'pending', provider: PROVIDER, reference: request.reference ?? null }, { provider: MANUAL, reference: null, promptedAt: null, supersededReferences: supersededWith(request, request.reference) });
     if (back) await audit('payment_mobile_money_failed', request.id, { reference: request.reference }, { why });
     return Boolean(back);
   }
 
-  /**
-   * Settle one request from what Tunzaa says about a transaction. Idempotent:
-   * a repeat callback or a refresh finds the request already decided.
-   * Returns { state: 'completed' | 'failed' | 'in_progress' | 'held' | 'none', ... }.
-   */
-  /**
-   * The transaction's state: what a verified callback said about it (AzamPay), or read
-   * back from the provider (Tunzaa). null when neither is available (AzamPay refresh).
-   */
-  async function remoteStatus(txn, confirmed) {
-    if (confirmed) return confirmed;
-    if (typeof client?.checkStatus !== 'function') return null;
-    return client.checkStatus(txn);
+  /** Money AzamPay confirmed that no open attempt of ours accounts for: recorded for staff, nothing approved. */
+  async function orphaned(request, txn, remote, error) {
+    await audit('payment_mobile_money_orphaned', request.id, { status: request.status, reference: request.reference ?? null }, { transactionId: txn, amountTzs: remote?.amountTzs ?? null, ...(error ? { error } : {}) });
   }
 
+  /**
+   * Settle one request. `confirmed` is what AzamPay's verified callback said about
+   * `transactionId` ({ status: 'COMPLETED' | 'FAILED' | 'UNKNOWN', amountTzs, remark, raw });
+   * without it (a refresh, the sweep) there is nothing to ask AzamPay, so the request only
+   * reports where it stands. Idempotent: a repeat callback finds the request already decided.
+   * Returns { state: 'completed' | 'failed' | 'in_progress' | 'held' | 'none', ... }.
+   */
   async function settle(request, { transactionId = null, confirmed = null } = {}) {
-    if (request.status === 'approved') return { state: 'completed', paymentRequest: view(request) };
+    const paid = Boolean(transactionId) && confirmed?.status === 'COMPLETED';
+    if (request.status === 'approved') {
+      // Settled already. The same transaction again is a repeat; a DIFFERENT one means money came in twice.
+      if (paid && request.reference !== transactionId) {
+        await orphaned(request, transactionId, confirmed, 'already_settled');
+        await tellStaff(request, 'duplicate_payment', { transactionId, amountTzs: confirmed.amountTzs });
+        return { state: 'completed', paymentRequest: view(request), duplicatePayment: true };
+      }
+      return { state: 'completed', paymentRequest: view(request) };
+    }
     if (request.status !== 'pending') {
-      // Cancelled or rejected: if the money turned up anyway, staff must hear of it.
-      const late = transactionId || (request.provider === PROVIDER && !isPlaceholder(request.reference) ? request.reference : null);
-      if (late) {
-        try {
-          const remote = await remoteStatus(late, late === transactionId ? confirmed : null);
-          if (remote?.status === 'COMPLETED') {
-            await audit('payment_mobile_money_orphaned', request.id, { status: request.status }, { transactionId: late, amountTzs: remote.amountTzs });
-            if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: late });
-          }
-        } catch { /* the next callback retry looks again */ }
+      // Cancelled, rejected or expired: if the money turned up anyway, staff must hear of it.
+      if (paid) {
+        await orphaned(request, transactionId, confirmed, 'request_closed');
+        await tellStaff(request, 'request_closed', { transactionId, amountTzs: confirmed.amountTzs });
       }
       return { state: 'failed', paymentRequest: view(request) };
     }
     const txn = transactionId || (!isPlaceholder(request.reference) && inFlight(request) ? request.reference : null);
     if (!txn) {
-      // A claim that never produced a prompt: give it back once it has expired.
-      if (request.provider === PROVIDER && isPlaceholder(request.reference) && !inFlight(request)) await release(request, 'claim_expired');
+      // A claim that never produced a prompt, or a prompt whose answer never came: give it back once it has expired.
+      if (request.provider === PROVIDER && request.reference && !inFlight(request)) {
+        await release(request, isPlaceholder(request.reference) ? 'claim_expired' : 'prompt_expired');
+      }
       return { state: request.provider === PROVIDER && inFlight(request) ? 'in_progress' : 'none', paymentRequest: view(request) };
     }
 
-    let remote;
-    try {
-      remote = await remoteStatus(txn, txn === transactionId ? confirmed : null);
-    } catch {
-      return { state: 'in_progress', paymentRequest: view(request), unconfirmed: true };
-    }
-    // AzamPay: no callback yet and nothing to ask — the prompt is still out.
+    // No callback yet and nothing to ask AzamPay: the prompt is still out.
+    const remote = txn === transactionId ? confirmed : null;
     if (!remote) return { state: 'in_progress', paymentRequest: view(request) };
     if (remote.status === 'COMPLETED') {
-      // Money received must be what was asked: an amount we cannot read is not good enough.
+      // The request has no attempt of ours open (it was released after a failure or an expired
+      // prompt, or never prompted): this money is not matched to a prompt. Staff look; nothing is approved.
+      if (request.provider !== PROVIDER) {
+        await orphaned(request, txn, remote, 'no_open_attempt');
+        await tellStaff(request, 'no_open_attempt', { transactionId: txn, amountTzs: remote.amountTzs });
+        return { state: 'held', reason: 'no_open_attempt', paymentRequest: view(request) };
+      }
+      // Money for a prompt of this request that was given up (failed, or unanswered and retried). It is held
+      // BEFORE anything else is looked at — in particular while a new prompt is being sent and `reference` is
+      // only a claim — and the attempt that is open now stays payable: the event payment is left as it is
+      // (keepPayable), so the new prompt can still settle and staff refund or apply the old money.
+      if (supersededOf(request).includes(txn) && request.reference !== txn) {
+        await audit('payment_mobile_money_held', request.id, { reference: request.reference ?? null }, { error: 'transaction_mismatch', superseded: true, transactionId: txn, amountTzs: remote.amountTzs });
+        await tellStaff(request, 'transaction_mismatch', { transactionId: txn, amountTzs: remote.amountTzs, superseded: true }, { keepPayable: true });
+        return { state: 'held', reason: 'transaction_mismatch', paymentRequest: view(request) };
+      }
+      // Money received must be what was asked: less, more, or an amount we cannot read is not good enough.
       if (remote.amountTzs == null || remote.amountTzs !== Number(request.amountTzs)) {
         await audit('payment_mobile_money_amount_mismatch', request.id, { amountTzs: request.amountTzs }, { received: remote.amountTzs, transactionId: txn });
-        if (request.eventOrderId) await eventOrders.onHeld(request, 'amount_mismatch', { transactionId: txn });
+        await tellStaff(request, 'amount_mismatch', { transactionId: txn, amountTzs: remote.amountTzs });
         return { state: 'held', reason: 'amount_mismatch', paymentRequest: view(request) };
       }
       // The request records the prompt it is waiting on: money confirmed for a different
-      // transaction is not this request's (B6a review). Staff look; nothing is approved.
-      if (request.provider === PROVIDER && request.reference && !isPlaceholder(request.reference) && request.reference !== txn) {
+      // transaction (e.g. an older prompt, after a retry) is not this attempt's (B6a review).
+      // Staff look; nothing is approved.
+      if (request.reference && !isPlaceholder(request.reference) && request.reference !== txn) {
         await audit('payment_mobile_money_held', request.id, { reference: request.reference }, { error: 'transaction_mismatch', transactionId: txn, amountTzs: remote.amountTzs });
-        if (request.eventOrderId) await eventOrders.onHeld(request, 'transaction_mismatch', { transactionId: txn });
+        // A transaction we never sent (not one of this request's given-up prompts): an event payment goes to reconciliation.
+        await tellStaff(request, 'transaction_mismatch', { transactionId: txn, amountTzs: remote.amountTzs });
         return { state: 'held', reason: 'transaction_mismatch', paymentRequest: view(request) };
       }
       // One transaction confirms one payment, flags or not.
       if (await transactionUsedElsewhere(request, txn)) {
         await audit('payment_mobile_money_held', request.id, null, { error: 'reference_already_used', transactionId: txn });
+        if (!request.eventOrderId) await tellStaff(request, 'reference_already_used', { transactionId: txn, amountTzs: remote.amountTzs });
         return { state: 'held', reason: 'reference_already_used', paymentRequest: view(request) };
       }
       if (!canSettle()) {
@@ -357,8 +440,8 @@ export function createMobileMoneyService({
         const latest = await paymentRequests.findByIdAsync(request.id);
         if (latest?.status !== 'approved') {
           // Money arrived for a request that was cancelled or rejected meanwhile: staff must look.
-          await audit('payment_mobile_money_orphaned', request.id, { status: latest?.status }, { transactionId: txn, amountTzs: remote.amountTzs });
-          if (request.eventOrderId) await eventOrders.onHeld(request, 'request_closed', { transactionId: txn });
+          await orphaned(latest ?? request, txn, remote, 'request_closed');
+          await tellStaff(request, 'request_closed', { transactionId: txn, amountTzs: remote.amountTzs });
           return { state: 'held', reason: 'request_closed', paymentRequest: view(latest ?? request) };
         }
         return { state: 'completed', paymentRequest: view(latest) };
@@ -366,19 +449,20 @@ export function createMobileMoneyService({
       if (out.error) {
         // e.g. the plan being upgraded ended meanwhile: money is in, staff must look.
         await audit('payment_mobile_money_held', request.id, null, { error: out.error, transactionId: txn });
-        if (request.eventOrderId) await eventOrders.onHeld(request, out.error, { transactionId: txn });
+        await tellStaff(request, out.error, { transactionId: txn, amountTzs: remote.amountTzs });
         return { state: 'held', reason: out.error, paymentRequest: view(request) };
       }
       return { state: 'completed', paymentRequest: view(out.paymentRequest) };
     }
     if (remote.status === 'FAILED') {
       // Only an attempt we still hold is released; a late FAILED for an old one changes nothing.
-      if (request.reference === txn) {
+      if (request.provider === PROVIDER && request.reference === txn) {
         await release(request, remote.remark || 'failed');
         // S4: the event attempt is over (EventPayment failed, request cancelled); the hold keeps running and the member can retry.
         if (request.eventOrderId) await eventOrders.onFailed(request, remote.remark || null);
+        return { state: 'failed', paymentRequest: view({ ...request, provider: MANUAL, reference: null }), remark: remote.remark };
       }
-      return { state: 'failed', paymentRequest: view({ ...request, provider: MANUAL, reference: null }), remark: remote.remark };
+      return { state: 'failed', paymentRequest: view(request), remark: remote.remark };
     }
     return { state: 'in_progress', paymentRequest: view(request) };
   }
@@ -387,7 +471,7 @@ export function createMobileMoneyService({
   async function refresh({ memberId, paymentRequestId, role = 'member' }) {
     if (roleOf(role) === 'trainer' && !trainerProducts()) {
       if (!client) return fail('forbidden', 403, { requiredRoles: ['member'] });
-      // B6a review: TUNZAA_TRAINER_PRODUCTS turned off while the trainer's own pass prompt is
+      // B6a review: AZAMPAY_TRAINER_PRODUCTS turned off while the trainer's own pass prompt is
       // out — they may still ask how it went (not start a new one). Anything else answers as
       // the member-only route did before (403 forbidden).
       const request = await paymentRequests.findByIdAsync(paymentRequestId);
@@ -408,35 +492,35 @@ export function createMobileMoneyService({
   }
 
   /**
-   * A signed callback from Tunzaa. The signature is checked by the route; here
-   * the request is found by our own reference and the transaction is confirmed
-   * with Tunzaa. Answers 200-class so Tunzaa stops retrying, except for a
-   * malformed body.
+   * AzamPay's callback. The RSA signature (and clientId) is checked by the route;
+   * here the request is found by our own reference and the amount, the transaction
+   * and its single use are checked. Answers 200-class so AzamPay stops retrying,
+   * except for a malformed body.
    */
   async function handleCallback(payload) {
-    if (!client) return fail('feature_disabled', 404);
-    // AzamPay: the route verified the signature; the client turns the callback into our terms.
-    const parsed = typeof client.parseCallback === 'function'
-      ? client.parseCallback(payload)
-      : { referenceId: payload?.reference_id, transactionId: payload?.transaction_id ? String(payload.transaction_id) : null, confirmed: null };
+    if (!client || typeof client.parseCallback !== 'function') return fail('feature_disabled', 404);
+    const parsed = client.parseCallback(payload);
     const requestId = requestIdOf(parsed.referenceId);
     if (!requestId || !parsed.transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
     if (!request) return { status: 200, ok: true, ignored: 'unknown_reference' };
     // AzamPay names a transaction more than one way: use the one the request recorded, if any.
-    const transactionId = (parsed.transactionIds || []).includes(request.reference) ? request.reference : parsed.transactionId;
-    const confirmed = client.confirmsByCallback ? (parsed.confirmed ?? null) : null;
-    // S4 (event requests only): a callback that was fully processed once is a no-op the second time, without calling Tunzaa.
-    // It is recorded AFTER processing, so a crash midway does not swallow Tunzaa's retry. The state machine, the database's
+    // Failing that, one it gave up earlier (a late answer for an old prompt); else the callback's own.
+    const ids = parsed.transactionIds || [];
+    const given = supersededOf(request);
+    const transactionId = ids.includes(request.reference) ? request.reference : (ids.find((id) => given.includes(id)) ?? parsed.transactionId);
+    const confirmed = parsed.confirmed ?? null;
+    // S4 (event requests only): a callback that was fully processed once is a no-op the second time.
+    // It is recorded AFTER processing, so a crash midway does not swallow AzamPay's retry. The state machine, the database's
     // one-success-per-order index and the idempotent confirmation are the guarantees; this is the belt.
-    const seenKey = request.eventOrderId && webhookSeen ? `${PROVIDER}:${transactionId}:${String(payload?.status ?? payload?.transactionstatus ?? '').toUpperCase()}` : null;
+    const seenKey = request.eventOrderId && webhookSeen ? `${PROVIDER}:${transactionId}:${String(payload?.transactionstatus ?? '').toUpperCase()}` : null;
     if (seenKey && await webhookSeen.has(seenKey)) return { status: 200, ok: true, duplicate: true };
     const out = await settle(request, { transactionId, confirmed });
     if (seenKey && ['completed', 'failed'].includes(out.state)) await webhookSeen.mark(seenKey);
-    return { status: 200, ok: true, state: out.state };
+    return { status: 200, ok: true, state: out.state, ...(out.reason ? { reason: out.reason } : {}) };
   }
 
-  /** The sweep (eventPaymentReconciliation): settle one request by id as the refresh route does. */
+  /** The sweep (eventPaymentReconciliation): where one request stands, as the refresh route reports it. */
   async function settleById(paymentRequestId) {
     if (!client) return { state: 'none' };
     const request = await paymentRequests.findByIdAsync(paymentRequestId);

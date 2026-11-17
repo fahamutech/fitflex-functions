@@ -121,8 +121,8 @@ Staff:
 
 ## 8. Known limitations
 
-- **No payment gateway.** Nothing is collected online; `/webhooks/selcom` is
-  still the unused subscription stub. A gateway would create the same
+- **No payment gateway.** Nothing is collected online for an organisation (AzamPay,
+  the only payment method since 2026-11-17, takes members' payments only). A gateway would create the same
   `B2BPayment` a confirmed notice does.
 - **Proof of payment is an image** uploaded through `/storage/upload`; PDFs are
   not accepted there. Since 28 Oct 2026 that upload needs an active billing

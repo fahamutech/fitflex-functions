@@ -1,7 +1,10 @@
-// Marathon & running events · S4 — manual payment at the route level against the CI database (spec §3.4–§3.10, §3.19):
+// Marathon & running events · S4 — the staff side of event payments at the route level against the CI database (spec §3.4–§3.10, §3.19).
+// A member pays through AzamPay (events-s4-azampay.specs.mjs); what staff decide here is a payment submitted by hand (an organisation's
+// notice, or one made before 2026-11-17), set up with the fixture's submittedByHand:
 // options, initiation (idempotency, validators, duplicate IDs, hold rules), admin confirmation with the typed amount
 // received, maker-checker, rejection, one ticket set per approval, the late-payment rehold and its refund, repair and
 // sweep, and the PaymentRequest regressions for the other products.
+import './fixtures/azampay-env.mjs';
 import { test, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { ensureInit } from '../functions/index.mjs';
@@ -11,14 +14,14 @@ import { payForEventOrder, eventOrderPaymentStatus, resetEventsPaymentLimits } f
 import { eventsOptions } from '../functions/events-public.mjs';
 import { adminPaymentRequests, adminDecidePaymentRequest, adminVerifyPaymentRequest, adminRequestPaymentChange, adminConfirmPaymentChange, adminUpdatePaymentRequest } from '../functions/admin-payments.mjs';
 import { adminRepairEventPayment } from '../functions/events-admin.mjs';
-import { harness, s4On, s4Off, saveManualDetails, clearManualDetails, txId, uid, phone, D, H, TICKET_SECRET } from './fixtures/events-s4.mjs';
+import { harness, submittedByHand, s4On, s4Off, txId, uid, phone, D, H, TICKET_SECRET } from './fixtures/events-s4.mjs';
 
 await ensureInit();
 const h = harness();
 const { db } = h;
 const call = h.call;
 afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); });
-after(async () => { await clearManualDetails(); await h.cleanup(); await db.destroy(); });
+after(async () => { await h.cleanup(); await db.destroy(); });
 
 const CONSENT = '2026-11-draft';
 const key = () => `s4_${uid('').slice(1)}`;
@@ -37,26 +40,36 @@ async function place(f, b, n = 1) {
   assert.equal(r.status, 201, JSON.stringify(r.body));
   return r.body;
 }
-const pay = (b, orderId, body, k = key()) => call(payForEventOrder, b.claims, { params: { id: orderId }, headers: { 'Idempotency-Key': k }, body });
+/**
+ * Start paying an order. A member's order is paid through AzamPay (body {}); with `reference` the started payment is
+ * then turned into one submitted by hand (fixture submittedByHand): the row shape of an organisation's notice and of
+ * payments made before 2026-11-17, which is what the staff tools specified below decide.
+ */
+const pay = async (b, orderId, body = {}, k = key()) => {
+  const { reference, payerPhone, ...rest } = body;
+  const r = await call(payForEventOrder, b.claims, { params: { id: orderId }, headers: { 'Idempotency-Key': k }, body: rest });
+  if (reference && r.status === 201) {
+    await submittedByHand(orderId, { reference, payerPhone });
+    r.body.payment = (await call(eventOrderPaymentStatus, b.claims, { params: { id: orderId } })).body.payment;
+  }
+  return r;
+};
 async function admins() {
   return { a: h.claimsOf(await h.user({ userType: 'admin' }), 'admin'), b: h.claimsOf(await h.user({ userType: 'admin' }), 'admin') };
 }
 const decide = (admin, requestId, body) => call(adminDecidePaymentRequest, admin, { params: { id: requestId }, body });
 const setup = async (opts = {}) => {
   s4On(opts);
-  await saveManualDetails();
   const f = await h.sellingEvent({ categories: [{ name: '10K', distanceMeters: 10000, tickets: [{ name: 'Early', priceTzs: 20000, capacity: 5 }] }] });
   const b = await buyer();
   return { f, b };
 };
 
-test('scenario: pay by Lipa Namba and be confirmed — one payment, ticket per place, outbox, notices, hold extended', async () => {
+test('scenario: a payment submitted by hand is confirmed by staff — one payment, ticket per place, outbox, notices, hold extended', async () => {
   const { f, b } = await setup();
   const o = await place(f, b, 2);
   const orderId = o.order.id;
-  assert.equal(o.next.payment, 'manual');
-  assert.equal(o.next.instructions.lipaNamba, '5123456');
-  assert.equal(o.next.instructions.amountTzs, 40000);
+  assert.deepEqual(o.next, { payment: 'provider', paymentRequestId: null, instructions: null }, 'a member is offered AzamPay, never pay-by-hand instructions');
   const ref = txId();
   const p = await pay(b, orderId, { reference: ref, payerPhone: b.phone });
   assert.equal(p.status, 201, JSON.stringify(p.body));
@@ -88,32 +101,34 @@ test('scenario: pay by Lipa Namba and be confirmed — one payment, ticket per p
   assert.ok(tickets.every(t => t.status === 'active' && t.tokenHash.length === 64 && t.displayCode));
   const types = (await h.outbox(f.event.id)).map(x => x.type).sort();
   assert.deepEqual(types, ['payment.succeeded', 'registration.created', 'registration.created', 'registration.paid', 'registration.paid', 'ticket.issued', 'ticket.issued']);
-  assert.equal((await h.notifications(b.sub, 'event_payment_submitted')).length, 1);
+  // (the "payment received · being checked" notice is sent when an organisation submits its notice; a member pays through AzamPay)
   assert.equal((await h.notifications(b.sub, 'event_payment_confirmed')).length, 1);
   void second;
 });
 
 // ── Options, flags, fail closed ──────────────────────────────────────────
 
-test('options.payment: none until the flag, the Lipa Namba and a ticket secret are all there; the S4 keys appear with EVENTS_REGISTRATION', async () => {
+test('options.payment: provider (AzamPay) only with its flags and a ticket secret, else none — never manual; the S4 keys appear with EVENTS_REGISTRATION', async () => {
   const optionsNow = async () => (await call(eventsOptions, null)).body;
-  s4On();
-  await clearManualDetails();
+  s4On({ azampay: false });
   let o = await optionsNow();
-  assert.equal(o.payment, 'none', 'manual flag on but no Lipa Namba saved');
+  assert.equal(o.payment, 'none', 'the organisation-notice flag alone offers a member nothing');
   assert.deepEqual(o.hold, { manualExtendHours: 24, manualMaxHours: 48, providerExtendMinutes: 10, lateGraceHours: 24 });
   assert.deepEqual(o.tickets, { qr: true, scanning: false });
   assert.equal(o.refundDays, 5);
   assert.ok(!('manualConfirmHours' in o));
-  await saveManualDetails();
+  process.env.MANUAL_PAY_INSTRUCTIONS = '1';   // a removed flag changes nothing
+  assert.equal((await optionsNow()).payment, 'none');
+  delete process.env.MANUAL_PAY_INSTRUCTIONS;
+  s4On();
   o = await optionsNow();
-  assert.equal(o.payment, 'manual'); assert.equal(o.manualConfirmHours, 24);
+  assert.equal(o.payment, 'provider'); assert.ok(!('manualConfirmHours' in o));
   delete process.env.EVENT_TICKET_SECRET;
   assert.equal((await optionsNow()).payment, 'none', 'no ticket secret: nothing is taken');
   process.env.EVENT_TICKET_SECRET = 'too-short';
   assert.equal((await optionsNow()).payment, 'none', 'a secret under 32 characters is no secret');
   process.env.EVENT_TICKET_SECRET = TICKET_SECRET;
-  delete process.env.EVENTS_PAYMENTS_MANUAL;
+  delete process.env.EVENTS_PAYMENTS_AZAMPAY;
   assert.equal((await optionsNow()).payment, 'none', 'payments flag off');
   // EVENTS_MODULE alone: no S3/S4 keys at all
   s4Off(); process.env.EVENTS_MODULE = '1';
@@ -129,8 +144,8 @@ test('initiation without a ticket secret answers 503 tickets_unavailable and wri
   assert.deepEqual([r.status, r.body.error], [503, 'tickets_unavailable']);
   assert.equal((await db('EventPayment').where({ orderId: o.order.id })).length, 0);
   process.env.EVENT_TICKET_SECRET = TICKET_SECRET;
-  delete process.env.EVENTS_PAYMENTS_MANUAL;
-  const off = await pay(b, o.order.id, { reference: txId(), payerPhone: b.phone });
+  delete process.env.EVENTS_PAYMENTS_MANUAL; delete process.env.EVENTS_PAYMENTS_AZAMPAY;
+  const off = await pay(b, o.order.id, {});
   assert.deepEqual([off.status, off.body], [404, { error: 'feature_disabled' }]);
   // reads still work with intake off: a member who already paid keeps access
   const status = await call(eventOrderPaymentStatus, b.claims, { params: { id: o.order.id } });
@@ -149,42 +164,40 @@ test('initiation: amount and currency come from the order; the body\'s amount, c
   assert.deepEqual((await pay(other, o.order.id, { reference: txId(), payerPhone: other.phone })).body, { error: 'order_not_found' });
   const noKey = await call(payForEventOrder, b.claims, { params: { id: o.order.id }, body: { reference: txId(), payerPhone: b.phone } });
   assert.deepEqual([noKey.status, noKey.body.error], [400, 'idempotency_key_required']);
-  const r = await pay(b, o.order.id, { reference: txId(), payerPhone: b.phone, amountTzs: 1, currency: 'USD', provider: 'free', status: 'succeeded', orderId: 'x' });
+  const r = await pay(b, o.order.id, { amountTzs: 1, currency: 'USD', provider: 'free', status: 'succeeded', orderId: 'x' });
   assert.equal(r.status, 201, JSON.stringify(r.body));
-  assert.equal(r.body.payment.amountTzs, 20000); assert.equal(r.body.payment.currency, 'TZS'); assert.equal(r.body.payment.method, 'manual');
+  assert.equal(r.body.payment.amountTzs, 20000); assert.equal(r.body.payment.currency, 'TZS'); assert.equal(r.body.payment.method, 'provider');
   const req = await db('PaymentRequest').where({ eventOrderId: o.order.id }).first();
   assert.deepEqual([req.amountTzs, req.currency, req.provider, req.status, req.memberId], [20000, 'TZS', 'admin_approved', 'pending', b.sub]);
   assert.equal(req.note, `event_order:${o.order.reference}`);
-  assert.equal(req.payerPhone, b.phone);
+  assert.deepEqual([req.payerPhone, req.memberReference], [null, null], 'nothing typed by the member is stored');
   assert.equal(r.body.order.status, 'awaiting_payment');
-  assert.deepEqual(r.body.next, { payment: 'manual', paymentRequestId: req.id, instructions: null });
+  assert.deepEqual(r.body.next, { payment: 'provider', paymentRequestId: req.id, instructions: null });
 });
 
-test('initiation validators: transaction ID and payer phone; a body that disagrees with the mode is 409 payment_mode_mismatch', async () => {
+test('a member can no longer send a transaction ID: reference / payerPhone are 409 payment_mode_mismatch and nothing is written', async () => {
   const { f, b } = await setup();
   const o = await place(f, b);
   const id = o.order.id;
-  assert.equal((await pay(b, id, { reference: 'x', payerPhone: b.phone })).body.error, 'payment_reference_invalid');
-  assert.equal((await pay(b, id, { reference: txId() })).body.error, 'payer_phone_required');
-  assert.equal((await pay(b, id, { reference: txId(), payerPhone: '12345' })).body.error, 'payer_phone_invalid');
-  assert.equal((await pay(b, id, { payerPhone: b.phone })).body.error, 'payment_reference_required');
-  const mismatch = await pay(b, id, {});
-  assert.deepEqual([mismatch.status, mismatch.body], [409, { error: 'payment_mode_mismatch', mode: 'manual' }]);
+  const send = body => call(payForEventOrder, b.claims, { params: { id }, headers: { 'Idempotency-Key': key() }, body });
+  for (const body of [{ reference: txId(), payerPhone: b.phone }, { reference: txId() }, { payerPhone: b.phone }, { reference: 'x' }]) {
+    const r = await send(body);
+    assert.deepEqual([r.status, r.body], [409, { error: 'payment_mode_mismatch', mode: 'provider' }], JSON.stringify(body));
+  }
   assert.equal((await db('EventPayment').where({ orderId: id })).length, 0, 'nothing written by any refusal');
+  assert.equal((await db('PaymentRequest').where({ eventOrderId: id })).length, 0);
 });
 
 test('idempotency: the same key and body replays the first answer; the same key with another body is 409; a new key while one is live is 409 payment_in_progress', async () => {
   const { f, b } = await setup();
   const o = await place(f, b);
   const id = o.order.id;
-  const k = key(); const ref = txId();
-  const first = await pay(b, id, { reference: ref, payerPhone: b.phone }, k);
+  const k = key();
+  const first = await pay(b, id, {}, k);
   assert.equal(first.status, 201);
-  const again = await pay(b, id, { reference: ref, payerPhone: b.phone, amountTzs: 99 }, k);
+  const again = await pay(b, id, { amountTzs: 99 }, k);
   assert.deepEqual([again.status, again.body.replayed, again.body.payment.id], [200, true, first.body.payment.id]);
-  const reused = await pay(b, id, { reference: txId(), payerPhone: b.phone }, k);
-  assert.deepEqual([reused.status, reused.body.error], [409, 'idempotency_key_reused']);
-  const second = await pay(b, id, { reference: txId(), payerPhone: b.phone });
+  const second = await pay(b, id, {});
   assert.deepEqual([second.status, second.body.error], [409, 'payment_in_progress']);
   assert.equal(second.body.payment.id, first.body.payment.id);
   assert.equal((await db('EventPayment').where({ orderId: id })).length, 1);
@@ -193,26 +206,8 @@ test('idempotency: the same key and body replays the first answer; the same key 
   const { a } = await admins();
   const reqRow = await db('PaymentRequest').where({ eventOrderId: id }).first();
   assert.equal((await decide(a, reqRow.id, { decision: 'approve', amountTzs: 20000 })).status, 200);
-  const replayed = await pay(b, id, { reference: ref, payerPhone: b.phone }, k);
+  const replayed = await pay(b, id, {}, k);
   assert.deepEqual([replayed.status, replayed.body.replayed, replayed.body.payment.state], [200, true, 'confirmed']);
-});
-
-test('a transaction ID confirms one payment across every product; the sixth refused duplicate in an hour is 429', async () => {
-  const { f, b } = await setup();
-  const ref = txId();
-  // the ID is already on a pass payment of someone else
-  const other = await buyer();
-  await db('PaymentRequest').insert({ id: `pay_${uid('').slice(1, 9)}`, memberId: other.sub, amountTzs: 50000, currency: 'TZS', status: 'pending', provider: 'admin_approved', tier: 'basic', memberReference: ref, memberReferenceKey: ref.replace(/[^A-Z0-9]/g, ''), payerPhone: other.phone });
-  const o = await place(f, b);
-  for (let i = 0; i < 5; i += 1) {
-    const r = await pay(b, o.order.id, { reference: ref, payerPhone: b.phone });
-    assert.deepEqual([r.status, r.body.error], [409, 'payment_reference_duplicate'], `refusal ${i + 1}`);
-  }
-  const sixth = await pay(b, o.order.id, { reference: ref, payerPhone: b.phone });
-  assert.deepEqual([sixth.status, sixth.body.error], [429, 'too_many_attempts']);
-  assert.equal((await db('EventPayment').where({ orderId: o.order.id })).length, 0);
-  await db('PaymentRequest').where({ memberReferenceKey: ref.replace(/[^A-Z0-9]/g, '') }).del();
-  await db('AuditLog').where({ actor: b.sub, action: 'payment_reference_duplicate' }).del();
 });
 
 // ── Hold rules ───────────────────────────────────────────────────────────
@@ -560,7 +555,7 @@ test('repair: an approved request whose order is not confirmed is completed by t
 });
 
 test('free order (total 0): one POST confirms it with no PaymentRequest; the ticket is issued', async () => {
-  s4On(); await saveManualDetails();
+  s4On();
   const f = await h.sellingEvent({ categories: [{ name: 'Kids', distanceMeters: 1000, tickets: [{ name: 'Free', priceTzs: 0, capacity: 5 }] }] });
   const b = await buyer();
   const o = await place(f, b);
@@ -645,12 +640,12 @@ test('an order in a currency other than TZS is refused at initiation (409 unsupp
   assert.equal((await db('EventPayment').where({ orderId: o.order.id })).length, 0);
 });
 
-test('the order page: awaiting_payment carries next.instructions and allowedActions pay + cancel; once submitted: no cancel, no pay', async () => {
+test('the order page: awaiting_payment offers AzamPay (no pay-by-hand instructions) and allowedActions pay + cancel; while a payment is being checked: no cancel, no pay', async () => {
   const { f, b } = await setup();
   const o = await place(f, b, 2);
   const before = (await call(getMyEventOrder, b.claims, { params: { id: o.order.id } })).body;
   assert.deepEqual(before.allowedActions, ['pay', 'cancel']);
-  assert.deepEqual([before.next.payment, before.next.instructions.accountName, before.next.instructions.reference, before.next.instructions.amountTzs, before.next.instructions.referenceRequired], ['manual', 'FitFlex Africa Ltd', o.order.reference, 40000, true]);
+  assert.deepEqual(before.next, { payment: 'provider', paymentRequestId: null, instructions: null });
   assert.equal(before.payment, null); assert.deepEqual(before.refunds, []);
   await pay(b, o.order.id, { reference: txId(), payerPhone: b.phone });
   const after_ = (await call(getMyEventOrder, b.claims, { params: { id: o.order.id } })).body;

@@ -78,7 +78,7 @@ Members, operators, and admins sign in with Firebase Google auth through `/auth/
 
 ## Open Items blocking full implementation
 
-- OI-004 Selcom STK push + webhook signature verification (`/webhooks/selcom`); admin-approved payment requests are used for pilot activation
+- OI-004 closed 2026-11-17: AzamPay is the only payment method (`PAYMENTS_AZAMPAY.md`, `/webhooks/azampay`); the Selcom webhook and Malipo by Tunzaa were removed. Staff approval of a payment request remains for payments AzamPay could not match
 - OI-008 Selcom BaaS GL-account ledger for credits
 - OI-009 Credits forfeiture T&C (expiry enforcement)
 # fitflex-functions

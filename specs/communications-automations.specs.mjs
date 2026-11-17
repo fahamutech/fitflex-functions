@@ -16,7 +16,6 @@ import { createAutomationService, DEFAULT_AUTOMATIONS } from '../src/services/au
 import { createDeliveryService } from '../src/services/delivery-service.mjs';
 import { createNotificationService } from '../src/services/notification-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
-import { createWebhookService } from '../src/services/webhook-service.mjs';
 import { addDays, localDay } from '../src/shared/member-progress.mjs';
 
 const uid = (p) => `${p}_${randomUUID().slice(0, 8)}`;
@@ -278,21 +277,6 @@ test('a rejected payment sends a recovery message with the amount — from the e
   await automations.runDue({ gymIds: [g] });
   const [run2] = await runsOf(g, m2.id);
   assert.equal(run2.occurrenceKey, `payment:${pay2}`);
-});
-
-test('Selcom: a paid membership raises the activation event, a failed payment the payment event', async () => {
-  const seen = [];
-  const webhookSeen = { findAsync: async () => null, insertAsync: async () => {} };
-  const store = new Map([['sub_w1', { id: 'sub_w1', status: 'payment_pending', type: 'direct_sub' }], ['sub_w2', { id: 'sub_w2', status: 'payment_pending', type: 'direct_sub' }]]);
-  const subs = { findByIdAsync: async (i) => store.get(i), updateByIdAsync: async (i, p) => ({ ...store.get(i), ...p }) };
-  const hooks = createWebhookService({
-    subscriptions: subs, webhookSeen,
-    onSubscriptionActivated: async (s) => seen.push(['activated', s.id, s.status]),
-    onPaymentFailed: async (s, paymentId) => seen.push(['failed', s.id, paymentId]),
-  });
-  await hooks.handleSelcom({ payment_id: 'p1', status: 'success', subscription_id: 'sub_w1' });
-  await hooks.handleSelcom({ payment_id: 'p2', status: 'failed', subscription_id: 'sub_w2' });
-  assert.deepEqual(seen, [['activated', 'sub_w1', 'active'], ['failed', 'sub_w2', 'p2']]);
 });
 
 // ── delivery and the platform reminder ────────────────────────────────────
