@@ -211,6 +211,54 @@ test('photos: valid data:image kept, our /storage path made absolute, other remo
   assert.ok(!noBase.body.gym.photos.some(p => p.includes('/storage/')), 'no public API base: storage paths are dropped');
 });
 
+test('photos: our storage URL with spaces or symbols in the file name is shown; anything not ours is still dropped', async () => {
+  const ours = 'https://api.example.test/storage/bafkreicid1';
+  const kept = [
+    `${ours}/_%20(31).webp`,
+    `${ours}/Gym%20Old%20School.webp`,
+    `${ours}/%23gym.webp`,
+    `${ours}/Best%20Functional%20Fitness%20%26%20%40more%E2%80%99s!.webp`,
+  ];
+  const dropped = [
+    'https://tracker.example/storage/bafkreicid1/_%20(31).webp',          // another host
+    'http://api.example.test/storage/bafkreicid1/a%20b.webp',             // not https
+    `${ours}/a%20b.webp?x=1`,                                             // query
+    `${ours}/a%20b.webp#x`,                                               // fragment
+    'https://user@api.example.test/storage/bafkreicid1/a%20b.webp',       // credentials
+    `${ours}/a%2Fb.webp`,                                                 // escaped slash
+    `${ours}/a%5Cb.webp`,                                                 // escaped backslash
+    `${ours}/%2E%2E`,                                                     // escaped dot segment
+    `${ours}/a%00b.webp`,                                                 // control character
+    `${ours}/a%ZZb.webp`,                                                 // broken escape
+    `${ours}/a%FFb.webp`,                                                 // not UTF-8
+    `${ours}/sub/a%20b.webp`,                                             // extra segment
+    'https://api.example.test/other/bafkreicid1/a%20b.webp',              // not /storage
+    'https://api.example.test/storage/a%20cid/b.webp',                    // escape in the cid
+    '//tracker.example/storage/bafkreicid1/a%20b.webp',                   // protocol-relative
+  ];
+  const id = await makeGym({ images: [...dropped.slice(0, 8), kept[0], kept[1], ...dropped.slice(8), kept[2], kept[3]], thumbnails: [kept[0]] });
+  const out = await resolve({ q: issueGymQr(id) });
+  assert.equal(out.statusCode, 200);
+  assert.deepEqual(out.body.gym.photos, kept);
+  assert.equal(out.body.gym.thumbnail, kept[0]);
+
+  // The root-relative form is made absolute on PUBLIC_API_URL.
+  const rel = await makeGym({ images: ['/storage/bafkreicid1/a%20b%20(2).webp'], thumbnails: [] });
+  const relOut = await resolve({ q: issueGymQr(rel) });
+  assert.deepEqual(relOut.body.gym.photos, [`${ours}/a%20b%20(2).webp`]);
+
+  // A base with a path: only addresses under that path are ours.
+  process.env.PUBLIC_API_URL = 'https://api.example.test/v1/';
+  const based = await makeGym({ images: ['https://api.example.test/v1/storage/bafkreicid1/a%20b.webp', kept[0]], thumbnails: [] });
+  const basedOut = await resolve({ q: issueGymQr(based) });
+  assert.deepEqual(basedOut.body.gym.photos, ['https://api.example.test/v1/storage/bafkreicid1/a%20b.webp']);
+
+  delete process.env.PUBLIC_API_URL;
+  const noBase = await resolve({ q: issueGymQr(id) });
+  assert.deepEqual(noBase.body.gym.photos, [], 'no public API base: nothing from storage is shown');
+  assert.equal(noBase.body.gym.thumbnail, null);
+});
+
 test('held back gyms answer the same 404: unlisted, suspended in moderation, suspended status', async () => {
   const unlisted = await makeGym({ homepageVisible: false });
   const suspended = await makeGym({ status: 'suspended' });
