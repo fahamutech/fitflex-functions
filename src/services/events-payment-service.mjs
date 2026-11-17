@@ -781,11 +781,21 @@ export function createEventsPaymentService({
         }
       });
     },
-    /** Money confirmed but not accepted (amount / transaction mismatch, ticket secret missing): hold for people, no ticket, no commit. */
+    /** Money confirmed but not accepted (amount / transaction mismatch, ticket secret missing): hold for people, no ticket, no commit. detail: { transactionId, keepPayable? }. */
     async onHeld(request, reason, detail = {}) {
       const payment = plain(await db('EventPayment').where({ paymentRequestId: request.id }).first());
       if (!payment) return;
       const code = ['amount_mismatch', 'transaction_mismatch'].includes(reason) ? reason : (reason === 'tickets_unavailable' ? 'provider_unknown' : reason);
+      // keepPayable: the money is for a prompt that was given up while a newer prompt of the same payment is open
+      // (or being sent). The payment is left as it is so the new prompt can settle and staff can still approve;
+      // people are told under a key of its own, so it is not folded into another exception of this payment.
+      if (detail.keepPayable) {
+        await audit('azampay', 'events.payment_superseded_attempt_paid', payment.orderId, null, { paymentId: payment.id, reason: code, transactionId: detail.transactionId ?? null });
+        if (ops) {
+          try { await ops.raise({ type: 'events_payment_reconciliation', severity: 'high', title: 'An event payment was also paid on an earlier prompt — refund or apply it by hand', dedupeKey: `evpay:${payment.id}:${detail.transactionId ?? 'superseded'}`, entityType: 'EventPayment', entityId: payment.id, detail: { orderId: payment.orderId, reason: code, transactionId: detail.transactionId ?? null } }); } catch { /* best effort */ }
+        }
+        return;
+      }
       if (payment.status === 'pending' || payment.status === 'created') {
         await db('EventPayment').where({ id: payment.id }).whereIn('status', ['pending', 'created']).update({ status: 'reconciliation_required', failureReason: code, updatedAt: now() });
       }

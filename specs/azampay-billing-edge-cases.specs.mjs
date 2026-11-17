@@ -55,7 +55,7 @@ const pendingPass = () => ({
   requests: [{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, note: null, requestedAt: iso(Date.now()) }],
 });
 
-function world({ subs, requests, scheduleRenewals = false, canSettle = true } = {}) {
+function world({ subs, requests, scheduleRenewals = false, canSettle = true, onHeldThrows = false } = {}) {
   const base = pendingPass();
   const subscriptions = memStore(subs ?? base.subs);
   const paymentRequests = memStore(requests ?? base.requests);
@@ -80,9 +80,12 @@ function world({ subs, requests, scheduleRenewals = false, canSettle = true } = 
       return { transactionId: `TXN_${remote.initiated.length}` };
     },
   };
+  // What bootstrap wires to an ops exception: staff are told about confirmed money that was not applied.
+  const held = [];
   const service = createMobileMoneyService({
     paymentRequests, subscriptions, adminPaymentService, auditLog, client,
     enabled: () => true, canSettle: () => canSettle, now: () => clock.t,
+    onHeld: async (request, reason, detail) => { held.push([request.id, reason, detail.transactionId, detail.amountTzs]); if (onHeldThrows) throw new Error('ops down'); },
   });
   const subscriptionService = createSubscriptionService({
     subscriptions, paymentRequests, checkins: memStore(), gyms: [],
@@ -91,7 +94,7 @@ function world({ subs, requests, scheduleRenewals = false, canSettle = true } = 
   const req = (id = 'pay_1') => paymentRequests.rows.find((r) => r.id === id);
   const sub = (id = 'sub_new') => subscriptions.rows.find((s) => s.id === id);
   const audited = (action) => audit.filter((a) => a.action === action);
-  return { subscriptions, paymentRequests, audit, audited, events, service, subscriptionService, adminPaymentService, remote, clock, req, sub };
+  return { subscriptions, paymentRequests, audit, audited, events, held, service, subscriptionService, adminPaymentService, remote, clock, req, sub };
 }
 const PAY = { memberId: 'm1', paymentRequestId: 'pay_1', phone: '0754123456' };
 /** AzamPay's callback as the route hands it over once the signature is verified. */
@@ -114,7 +117,7 @@ test('the exact amount settles the request once: plan active, one activation, th
 });
 
 test('less than asked (partial), more than asked (over), a missing or a non-numeric amount: held, nothing activated, what was received is in the audit', async () => {
-  for (const [amount, received] of [['59999', 59_999], ['1000', 1000], ['60001', 60_001], ['120000', 120_000], ['', null], [undefined, null], ['abc', null], ['0', null], ['-60000', null]]) {
+  for (const [amount, received] of [['59999', 59_999], ['1000', 1000], ['60001', 60_001], ['120000', 120_000], ['', null], [undefined, null], ['abc', null], ['0', null], ['-60000', null], ['59999.5', null], ['60000.4', null]]) {
     const w = world();
     await w.service.pay(PAY);
     const out = await w.service.handleCallback(cb({ amount }));
@@ -369,6 +372,104 @@ test('a request left with another provider\'s prompt (before 2026-11-17) is not 
   assert.equal((await w.adminPaymentService.decide({ id: 'pay_1', decision: 'reject', actorId: 'admin_1' })).error, undefined);
 });
 
+// ── security review of functions#360 ────────────────────────────────────────
+
+test('a late success for the OLD prompt arriving while the retry is being sent (reference is only a claim) is held, not approved; the second prompt still goes out and settles once', async () => {
+  for (const how of ['expired', 'failed']) {
+    const w = world();
+    await w.service.pay(PAY);                                              // TXN_1
+    if (how === 'expired') w.clock.t += PROMPT_TTL_MS + 1000;
+    else { await w.service.handleCallback(cb({ transactionstatus: 'failure' })); w.clock.t += 1000; }
+    let go;
+    w.remote.slow = new Promise((r) => { go = r; });
+    const retrying = w.service.pay(PAY);                                   // claimed, AzamPay not answered yet
+    await new Promise((r) => setImmediate(r));
+    assert.match(w.req().reference, /^pending:/, how);
+    assert.deepEqual(w.req().supersededReferences, ['TXN_1'], `${how}: the given-up prompt is remembered`);
+    // the old prompt's success lands in that window — by any of AzamPay's names for the transaction
+    const late = await w.service.handleCallback(cb({ transid: 'MNO_7', reference: 'TXN_1' }));
+    assert.deepEqual([late.state, late.reason], ['held', 'transaction_mismatch'], how);
+    assert.deepEqual([w.req().status, w.sub().status, activations(w)], ['pending', 'payment_pending', 0], how);
+    const row = w.audited('payment_mobile_money_held')[0];
+    assert.deepEqual([row.after.error, row.after.superseded, row.after.transactionId, row.after.amountTzs], ['transaction_mismatch', true, 'TXN_1', 60_000], how);
+    assert.deepEqual(w.held, [['pay_1', 'transaction_mismatch', 'TXN_1', 60_000]], `${how}: staff are told`);
+    go();
+    assert.equal((await retrying).status, 202, how);
+    assert.deepEqual([w.remote.initiated.length, w.req().reference], [2, 'TXN_2'], how);
+    assert.equal((await w.service.handleCallback(cb({ transid: 'TXN_2' }))).state, 'completed', how);
+    assert.equal(activations(w), 1, how);
+  }
+});
+
+test('a lost-record claim (no transaction id recorded) still settles by our reference when the transaction is not one the request gave up', async () => {
+  const w = world();
+  w.remote.failInitiate = 'unreachable';                                  // the prompt may be out; no transaction id recorded
+  await w.service.pay(PAY);
+  assert.match(w.req().reference, /^pending:/);
+  assert.equal((await w.service.handleCallback(cb({ transid: 'TXN_LOST' }))).state, 'completed');
+  assert.equal(activations(w), 1);
+});
+
+test('the request is read again after the claim: one that was settled in between is not sent to a phone', async () => {
+  const w = world();
+  const original = w.paymentRequests.updateByIdWhereAsync.bind(w.paymentRequests);
+  let once = true;
+  // A callback lands right after the claim is written (here: staff approved it by hand at that moment).
+  w.paymentRequests.updateByIdWhereAsync = async (id, where, patch) => {
+    const out = await original(id, where, patch);
+    if (out && once && String(patch.reference ?? '').startsWith('pending:')) {
+      once = false;
+      Object.assign(w.req(), { status: 'approved', reference: 'BANK_1', decidedBy: 'admin_1' });
+    }
+    return out;
+  };
+  const out = await w.service.pay(PAY);
+  assert.deepEqual([out.status, out.state, out.alreadyRequested], [200, 'completed', true]);
+  assert.equal(w.remote.initiated.length, 0, 'no prompt for a settled request');
+  assert.deepEqual([w.req().status, w.req().reference], ['approved', 'BANK_1']);
+});
+
+test('held money on a pass / plan is raised for staff (as events do), once per request and transaction; a failing raise never changes the outcome', async () => {
+  // amount mismatch
+  const a = world();
+  await a.service.pay(PAY);
+  await a.service.handleCallback(cb({ amount: '1000' }));
+  assert.deepEqual(a.held, [['pay_1', 'amount_mismatch', 'TXN_1', 1000]]);
+  // no attempt open, then paid twice
+  const b = world();
+  await b.service.pay(PAY);
+  await b.service.handleCallback(cb({ transactionstatus: 'failure' }));
+  await b.service.handleCallback(cb());
+  assert.deepEqual(b.held, [['pay_1', 'no_open_attempt', 'TXN_1', 60_000]]);
+  const c = world();
+  await c.service.pay(PAY);
+  await c.service.handleCallback(cb());
+  assert.deepEqual(c.held, [], 'a clean payment raises nothing');
+  await c.service.handleCallback(cb({ transid: 'TXN_SECOND' }));
+  assert.deepEqual(c.held, [['pay_1', 'duplicate_payment', 'TXN_SECOND', 60_000]]);
+  // a closed request, another transaction than the prompt, an upgrade whose plan ended
+  const d = world();
+  await d.service.pay(PAY);
+  Object.assign(d.req(), { status: 'rejected' });
+  await d.service.handleCallback(cb());
+  assert.deepEqual(d.held, [['pay_1', 'request_closed', 'TXN_1', 60_000]]);
+  const e = world();
+  await e.service.pay(PAY);
+  await e.service.handleCallback(cb({ transid: 'OTHER' }));
+  assert.deepEqual(e.held, [['pay_1', 'transaction_mismatch', 'OTHER', 60_000]]);
+  // a failure answer, a duplicate of a settled payment and a sandbox hold raise nothing
+  const f = world();
+  await f.service.pay(PAY);
+  await f.service.handleCallback(cb({ transactionstatus: 'failure' }));
+  assert.deepEqual(f.held, []);
+  // the raise failing (ops store down) does not turn a held payment into an error, and nothing is approved
+  const g = world({ onHeldThrows: true });
+  await g.service.pay(PAY);
+  const out = await g.service.handleCallback(cb({ amount: '1000' }));
+  assert.deepEqual([out.status, out.state, g.req().status], [200, 'held', 'pending']);
+  assert.equal(g.audited('payment_mobile_money_amount_mismatch').length, 1, 'the audit row is there whatever happens to the raise');
+});
+
 // ── one transaction, one request ────────────────────────────────────────────
 
 test('the same AzamPay transaction used for two requests: the second is held', async () => {
@@ -386,6 +487,7 @@ test('the same AzamPay transaction used for two requests: the second is held', a
   assert.deepEqual([out.state, out.reason], ['held', 'reference_already_used']);
   assert.deepEqual([w.req('pay_2').status, w.sub('sub_2').status], ['pending', 'payment_pending']);
   assert.equal(w.audited('payment_mobile_money_held')[0].after.error, 'reference_already_used');
+  assert.deepEqual(w.held, [['pay_2', 'reference_already_used', 'TXN_1', 60_000]]);
   assert.equal(activations(w), 1);
 });
 

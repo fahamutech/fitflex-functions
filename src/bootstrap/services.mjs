@@ -1,7 +1,7 @@
 // Composition root — every service is instantiated exactly once here with its
 // dependencies injected, then imported by the thin REST modules in functions/.
 import { createMobileMoneyService } from '../services/mobile-money-service.mjs';
-import { createAzamPayClient, azampaySettings } from '../integrations/payments/azampay.mjs';
+import { createAzamPayClient, azampaySettings, azampayConfigProblem } from '../integrations/payments/azampay.mjs';
 import { promoteStartedSubscriptions } from '../shared/subscription-status.mjs';
 import { sign as signJwt, registerAccountStatusLookup, signPurpose, verifyPurpose, invalidateAccountStatus } from '../auth/jwt.mjs';
 import { verifyFirebasePassword } from '../auth/firebase-password.mjs';
@@ -891,6 +891,11 @@ export const adminPaymentService = createAdminPaymentService({
 // Dormant unless AZAMPAY_PAYMENTS is set; the client exists only when AZAMPAY_APP_NAME,
 // AZAMPAY_CLIENT_ID and AZAMPAY_CLIENT_SECRET are set.
 const azampayConfig = azampaySettings();
+// AZAMPAY_ENV=live without usable live hosts: closed, never quietly the sandbox (azampaySettings answers null).
+const azampayProblem = azampayConfigProblem();
+if (azampayProblem) {
+  console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${azampayProblem === 'live_hosts_not_https' ? 'a live host is not https://' : 'AZAMPAY_AUTH_URL / AZAMPAY_CHECKOUT_URL are not both set'}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
+}
 export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
 if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
   console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
@@ -902,7 +907,7 @@ export const mobileMoneyService = createMobileMoneyService({
   enabled: azampayPaymentsOn,
   // Sandbox transactions still activate real plans, so against the sandbox this
   // must be asked for (AZAMPAY_SANDBOX_SETTLES); live needs nothing extra.
-  canSettle: () => azampayConfig?.environment === 'live' || azampaySandboxSettlesOn(),
+  canSettle: () => Boolean(azampayConfig) && (azampayConfig.environment === 'live' || azampaySandboxSettlesOn()),
   // Only tiers configured in Settings are sold (owner decision 2026-10-19).
   tierSellable: settingsService.isTierSellable,
   // B6a: trainer sessions and trainer gym passes (AZAMPAY_TRAINER_PRODUCTS, needs AZAMPAY_PAYMENTS).
@@ -917,6 +922,15 @@ export const mobileMoneyService = createMobileMoneyService({
     onHeld: (request, reason, detail) => eventsPaymentsService.hooks.onHeld(request, reason, detail),
     onFailed: (request, remark) => eventsPaymentsService.hooks.onFailed(request, remark),
   },
+  // Money AzamPay confirmed that was not approved (passes, plans, trainer products, shop orders): staff are told
+  // the way they are for events — an ops exception, one per request and transaction. Event orders raise their own.
+  onHeld: (request, reason, detail) => opsService.raise({
+    type: 'payment_conflict', severity: 'high',
+    title: `AzamPay money for payment ${request.id} was not applied (${reason}) — check it by hand`,
+    dedupeKey: `azampay_held:${request.id}:${detail?.transactionId ?? 'unknown'}`,
+    entityType: 'payment_request', entityId: request.id,
+    detail: { reason, ...detail },
+  }),
   // Shop orders (AZAMPAY_SHOP_ORDERS, off): a member's own order, while it still waits for this payment.
   shopOrders: {
     enabled: azampayShopOrdersOn,
@@ -1069,7 +1083,6 @@ export const gymPassService = createGymPassService({
   contacts: { findMember: verifiedContacts.findMember, contactsFor: verifiedContacts.contactsFor },
   notify: (userId, message) => notificationService.notify(userId, message),
   localeOf: async userId => (await communicationPreferences.findByIdAsync(userId))?.locale ?? null,
-  referenceFields: ref => subscriptionService.referenceFields(ref),
   channels: {
     whatsapp: async ({ phone, kind, params, locale, reference }) => {
       if (!whatsappChannelService.available()) return { status: 'skipped:whatsapp_not_available' };

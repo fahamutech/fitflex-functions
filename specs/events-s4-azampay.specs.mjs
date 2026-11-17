@@ -277,7 +277,7 @@ test('failure ends the attempt (EventPayment failed, request cancelled); the hol
   assert.equal((await db('EventPayment').where({ orderId: p.orderId, status: 'succeeded' })).length, 1);
 });
 
-test('a prompt whose callback never arrives: after the window the member gets a new prompt on the SAME request; a late success for the older attempt is held, never a ticket', async () => {
+test('a prompt whose callback never arrives: after the window the member gets a new prompt on the SAME request; a late success for the older attempt is held WITHOUT blocking the new one (ops exception only); the new prompt then settles once; staff could also have approved', async () => {
   const { f, b } = await setup();
   const p = await prompted(f, b);
   // ten minutes pass with no answer
@@ -286,16 +286,46 @@ test('a prompt whose callback never arrives: after the window the member gets a 
   assert.equal(again.status, 202, JSON.stringify(again.body));
   const request = await db('PaymentRequest').where({ id: p.request.id }).first();
   assert.notEqual(request.reference, p.txn);
+  assert.deepEqual(request.supersededReferences, [p.txn], 'the prompt that was given up is remembered on the request');
   assert.notEqual(remote.get(request.reference).utilityref, remote.get(p.txn).utilityref, 'a new attempt reference');
   assert.equal((await audits('payment_mobile_money_prompt_expired', p.request.id))[0].before.reference, p.txn);
-  // the member approved the first prompt after all
+  // the member approved the first prompt after all: held, staff told — and the payment stays payable
   const late = await callback(cbOf(p.txn));
   assert.equal(late.statusCode, 200);
-  const pay_ = await paymentOf(p.orderId);
-  assert.deepEqual([pay_.status, pay_.failureReason], ['reconciliation_required', 'transaction_mismatch']);
+  let pay_ = await paymentOf(p.orderId);
+  assert.deepEqual([pay_.status, pay_.failureReason, pay_.providerTransactionId], ['pending', null, request.reference], 'not moved to reconciliation: the new prompt is still open');
   assert.deepEqual([(await orderOf(p.orderId)).status, await ticketsOf(p.orderId)], ['awaiting_payment', 0]);
   const [held] = await audits('payment_mobile_money_held', p.request.id);
-  assert.deepEqual([held.after.error, held.after.transactionId, held.after.amountTzs], ['transaction_mismatch', p.txn, 20000]);
+  assert.deepEqual([held.after.error, held.after.superseded, held.after.transactionId, held.after.amountTzs], ['transaction_mismatch', true, p.txn, 20000]);
+  const ex = await db('OpsException').where({ dedupeKey: `evpay:${pay_.id}:${p.txn}` }).first();
+  assert.ok(ex && ex.severity === 'high' && ex.status === 'open', 'an ops exception of its own names the old transaction');
+  assert.equal((await db('PaymentRequest').where({ id: p.request.id }).first()).status, 'pending');
+  assert.equal((await call(eventOrderPaymentStatus, b.claims, { params: { id: p.orderId } })).body.payment.state, 'processing');
+  // AzamPay repeats the old success: still held, the same exception (not a second one)
+  await callback(cbOf(p.txn));
+  assert.equal((await db('OpsException').where('dedupeKey', 'like', `evpay:${pay_.id}%`)).length, 1);
+  // the new prompt is paid: it settles, once
+  const done = await callback(cbOf(request.reference));
+  assert.equal(done.statusCode, 200);
+  pay_ = await paymentOf(p.orderId);
+  assert.deepEqual([pay_.status, (await orderOf(p.orderId)).status, await ticketsOf(p.orderId)], ['succeeded', 'confirmed', 1]);
+  assert.deepEqual([(await db('PaymentRequest').where({ id: p.request.id }).first()).reference], [request.reference]);
+  assert.ok(await db('OpsException').where({ dedupeKey: `evpay:${pay_.id}:${p.txn}`, status: 'open' }).first(), 'the old money is still with staff');
+  // the old success once more, now on a settled request: recorded as a second payment, nothing changes
+  await callback(cbOf(p.txn, { message: 'again' }));
+  assert.equal(await ticketsOf(p.orderId), 1);
+
+  // the other way round: only the OLD prompt was paid. Staff can approve the request by hand (it was not blocked).
+  const q = await prompted(f, await member());
+  await db('PaymentRequest').where({ id: q.request.id }).update({ promptedAt: new Date(Date.now() - PROMPT_TTL_MS - 1000) });
+  const qb = h.claimsOf((await orderOf(q.orderId)).purchaserUserId);
+  assert.equal((await call(payByMobileMoney, qb, { params: { id: q.request.id }, body: { phone: msisdn() } })).status, 202);
+  await callback(cbOf(q.txn));
+  assert.equal((await paymentOf(q.orderId)).status, 'pending');
+  const admin = h.claimsOf(await h.user({ userType: 'admin' }), 'admin');
+  const approve = await call(adminDecidePaymentRequest, admin, { params: { id: q.request.id }, body: { decision: 'approve', amountTzs: 20000, reference: q.txn } });
+  assert.equal(approve.status, 200, JSON.stringify(approve.body));
+  assert.deepEqual([(await orderOf(q.orderId)).status, await ticketsOf(q.orderId)], ['confirmed', 1]);
   await db('OpsException').where('dedupeKey', 'like', 'evpay:%').del();
 });
 
@@ -343,6 +373,49 @@ test('a second, different success for an order that is already confirmed is reco
   assert.deepEqual([await ticketsOf(p.orderId), (await db('EventPayment').where({ orderId: p.orderId, status: 'succeeded' })).length], [1, 1]);
   assert.ok(await db('OpsException').where({ dedupeKey: `evpay:${(await paymentOf(p.orderId)).id}` }).first());
   await db('OpsException').where('dedupeKey', 'like', 'evpay:%').del();
+});
+
+test('the real wiring for a product that is not an event (a gym plan): held money raises an ops exception for staff, keyed by request and transaction; a callback without clientId is 403', async () => {
+  s4On();
+  const b = await member();
+  const subId = `sub_${uid('').slice(1, 13)}`; const payId = `pay_${uid('').slice(1, 13)}`; const gymId = `gym_${uid('').slice(1, 9)}`;
+  const day = 24 * 3600_000;
+  await db('Subscription').insert({ id: subId, memberId: b.sub, type: 'direct_sub', status: 'payment_pending', homeGymId: gymId, startedAt: new Date(), cycleStartedAt: new Date(), renewsAt: new Date(Date.now() + 30 * day), expiresAt: new Date(Date.now() + 30 * day) });
+  await db('PaymentRequest').insert({ id: payId, memberId: b.sub, subscriptionId: subId, amountTzs: 80000, status: 'pending', provider: 'admin_approved', requestedAt: new Date(), plan: 'monthly', gymId });
+  try {
+    const prompt = await call(payByMobileMoney, b.claims, { params: { id: payId }, body: { phone: msisdn() } });
+    assert.equal(prompt.status, 202, JSON.stringify(prompt.body));
+    const txn = (await db('PaymentRequest').where({ id: payId }).first()).reference;
+    // no clientId: refused at the door although the signature is good, and nothing changes
+    const { clientId, ...anonymous } = cbOf(txn);
+    void clientId;
+    assert.equal((await callback(anonymous)).statusCode, 403);
+    assert.equal((await db('PaymentRequest').where({ id: payId }).first()).status, 'pending');
+    // less than asked: held, audited, and staff are told
+    const held = await callback(cbOf(txn, { amount: '50000' }));
+    assert.equal(held.statusCode, 200);
+    assert.deepEqual([(await db('PaymentRequest').where({ id: payId }).first()).status, (await db('Subscription').where({ id: subId }).first()).status], ['pending', 'payment_pending']);
+    const ex = await db('OpsException').where({ dedupeKey: `azampay_held:${payId}:${txn}` }).first();
+    assert.ok(ex, 'an ops exception was raised');
+    assert.deepEqual([ex.type, ex.severity, ex.status, ex.entityType, ex.entityId], ['payment_conflict', 'high', 'open', 'payment_request', payId]);
+    const detail = typeof ex.detail === 'string' ? JSON.parse(ex.detail) : ex.detail;
+    assert.deepEqual([detail.reason, detail.transactionId, detail.amountTzs], ['amount_mismatch', txn, 50000]);
+    // AzamPay repeats it: the same exception, counted, not a second one
+    await callback(cbOf(txn, { amount: '50000' }));
+    const rows = await db('OpsException').where('dedupeKey', 'like', `azampay_held:${payId}:%`);
+    assert.deepEqual([rows.length, rows[0].occurrences], [1, 2]);
+    // an amount with cents is not rounded into the price
+    await callback(cbOf(txn, { amount: '79999.5' }));
+    assert.equal((await db('PaymentRequest').where({ id: payId }).first()).status, 'pending');
+    // the right amount settles it
+    await callback(cbOf(txn));
+    assert.deepEqual([(await db('PaymentRequest').where({ id: payId }).first()).status, (await db('Subscription').where({ id: subId }).first()).status], ['approved', 'active']);
+  } finally {
+    await db('OpsException').where('dedupeKey', 'like', `azampay_held:${payId}:%`).del();
+    await db('AuditLog').where({ target: payId }).del();
+    await db('PaymentRequest').where({ id: payId }).del();
+    await db('Subscription').where({ id: subId }).del();
+  }
 });
 
 test('rawRedacted keeps only the allowlisted AzamPay fields (never the signature, the password, the clientId or a phone number)', async () => {
