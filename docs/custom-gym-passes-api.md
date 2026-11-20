@@ -103,6 +103,10 @@ moment the payment is **approved**, not from the request.
 
 Public: `GET /gyms/:id/pass-plans`, `POST /gym-pass-invitations/preview { token }`.
 
+The public gym page (`POST /public/gyms/resolve`, flag `WEB_GYM_PROFILE`) also lists a gym's ACTIVE plans as
+`membership.gymPasses[{ planId, name, description, category, durationValue, durationUnit, beneficiaryLimit, priceTzs, terms,
+termsVersion }]`: empty while `GYM_CUSTOM_PASSES` is off, never the gym id. `planId` is what `POST /me/gym-pass-purchases` takes.
+
 Member (`member` token): `POST /me/gym-pass-purchases`, `POST /me/gym-pass-purchases/:purchaseId/cancel`,
 `GET /me/gym-passes`, `POST /me/gym-passes/claim { token? }`, `POST /me/gym-passes/:purchaseId/leave`, and as buyer
 `POST /me/gym-pass-purchases/:purchaseId/beneficiaries` and `…/beneficiaries/:beneficiaryId/(suspend|resume|remove|invite)`.
