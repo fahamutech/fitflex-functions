@@ -10,6 +10,7 @@ import { resolveWebGym, resetWebGymProfileLimits, WEB_GYM_PROFILE_RATE_PER_MINUT
 import { getGym } from '../functions/gyms.mjs';
 import { memberScanGymQr } from '../functions/checkins.mjs';
 import { extractQrPayload, publicRefFor } from '../src/services/web-gym-profile-service.mjs';
+import { gymPassStore } from '../src/bootstrap/services.mjs';
 
 assert.match(String(process.env.DATABASE_URL_CI || ''), /fitflex_ci/, 'specs run against the CI database only');
 
@@ -81,6 +82,7 @@ after(async () => {
   for (const [k, v] of [['QR_HMAC_SECRET', secretBefore], ['PUBLIC_API_URL', apiBefore]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await db('ModerationState').whereIn('entityId', created.gyms).del();
   if (flagBefore === undefined) delete process.env.WEB_GYM_PROFILE; else process.env.WEB_GYM_PROFILE = flagBefore;
+  if (created.gyms.length) await db('GymPassPlan').whereIn('gymId', created.gyms).del();
   for (const id of created.gyms) await gyms.removeAsync(g => g.id === id);
   if (created.gyms.length) await db('Gym').whereIn('id', created.gyms).del();
   await db.destroy();
@@ -116,6 +118,38 @@ test('a valid QR returns the whitelisted profile, from the same sources as the a
   assert.ok(Array.isArray(membership.passTiers));
   for (const t of membership.passTiers) assert.ok(Number.isInteger(t.monthlyPriceTzs) && t.monthlyPriceTzs > 0, 'tiers are the Settings tiers that are sellable');
   assert.ok(!JSON.stringify(out.body).includes(id), 'the internal gym id is nowhere in the response');
+});
+
+test('custom gym passes: active plans only, only while GYM_CUSTOM_PASSES is on, never the gym id', async () => {
+  const id = await makeGym();
+  const row = (extra) => ({
+    id: uid('gpp'), gymId: id, name: 'Couples 3 months', description: 'For two', category: 'couples', durationValue: 3, durationUnit: 'months',
+    beneficiaryLimit: 2, priceTzs: 240000, status: 'active', startPolicy: 'immediate', terms: 'No refunds.', termsVersion: 2,
+    createdBy: 'spec', createdAt: now(), updatedAt: now(), ...extra,
+  });
+  const live = await gymPassStore.insertPlan(row({}));
+  await gymPassStore.insertPlan(row({ name: 'Hidden', status: 'inactive' }));
+  const flag = process.env.GYM_CUSTOM_PASSES;
+  try {
+    delete process.env.GYM_CUSTOM_PASSES;
+    const off = await resolve({ q: issueGymQr(id) });
+    assert.equal(off.statusCode, 200);
+    assert.deepEqual(off.body.membership.gymPasses, [], 'flag off: no custom passes, the rest of the page is unchanged');
+    assert.equal(off.body.membership.gymPlans.length, 3);
+
+    process.env.GYM_CUSTOM_PASSES = '1';
+    const on = await resolve({ q: issueGymQr(id) });
+    assert.equal(on.statusCode, 200);
+    assert.deepEqual(on.body.membership.gymPasses, [{
+      planId: live.id, name: 'Couples 3 months', description: 'For two', category: 'couples', durationValue: 3, durationUnit: 'months',
+      beneficiaryLimit: 2, priceTzs: 240000, terms: 'No refunds.', termsVersion: 2,
+    }]);
+    assert.ok(!JSON.stringify(on.body).includes(id), 'the internal gym id is nowhere in the response');
+    const keys = keysDeep(on.body);
+    for (const k of FORBIDDEN_KEYS) assert.ok(!keys.has(k), `response must not carry ${k}`);
+  } finally {
+    if (flag === undefined) delete process.env.GYM_CUSTOM_PASSES; else process.env.GYM_CUSTOM_PASSES = flag;
+  }
 });
 
 test('no owner, KYC, bank, commission, member keys or internal ids', async () => {
