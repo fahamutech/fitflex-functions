@@ -51,8 +51,20 @@ moment the payment is **approved**, not from the request.
   attached again to that purchase or to any other purchase of the same buyer, by the buyer *or* the owner (`409 cannot_add_person`
   on an add, the generic `invalid_beneficiaries` at checkout; a pending row is skipped at claim). There is no unblock route in this
   version: only a future, explicit action by the person could lift it.
-* Suspended / removed people are refused at check-in with the existing code `subscription_inactive`; an expired pass the same;
-  another gym `wrong_gym`. No new refusal code.
+* Suspended / removed people are refused at check-in with the existing code `subscription_inactive`; an expired pass the same
+  once its 24 h grace (`SUBSCRIPTION_GRACE_HOURS`, the same rule as every direct plan; this version does not change it) has
+  passed; another gym `wrong_gym`. No new refusal code. A manual check-in by the owner (`POST /owner/members/:id/checkin`)
+  refuses an expired pass immediately and does not accept a removed person (`403 not_your_member`).
+* **Phase 5A, door and check-in** (additive; `pass` keys exist only while the flag is on):
+  * `POST /owner/members/:id/checkin` on a pass person records `passPurchaseId` / `beneficiaryId` on the visit, like the QR path,
+    so the visit counts in the person's attendance and in `utilisation`.
+  * A removed person (child subscription `cancelled`) is no longer the gym's direct member: not in the owner Members list or its
+    counts, not in message audiences, not checked in by hand. Legacy direct plans, cancelled or not, are unchanged.
+  * `POST /operator/verify-qr` and `POST /operator/checkins` add `pass: { name, category, expiresAt, daysLeft, status } | null`
+    (`null` for anyone not on a custom pass). Nothing about the buyer, the other people or any contact is returned.
+  * The scan preview of a pass the owner or buyer has paused answers `eligible: false`, `reason: "subscription_inactive"`,
+    `subscription: { tier: null, status: "suspended" }`, the same refusal the check-in gives. A paused legacy plan still answers
+    `no_active_pass`.
 * A payment that is rejected / cancelled / put back to pending stops access (purchase `cancelled` / `pending_payment`,
   child subscriptions `cancelled`); approving it again re-activates the same rows.
 

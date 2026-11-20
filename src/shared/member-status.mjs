@@ -25,6 +25,8 @@ export function latestDirectSubscriptionsByMember(subs, gymIds) {
   const byMember = new Map();
   for (const s of subs || []) {
     if (s.type !== DIRECT_SUB_TYPE || !gymIds.includes(s.homeGymId)) continue;
+    // A custom-pass person who was removed or whose pass was reversed is no longer the gym's member (legacy plans are unchanged).
+    if (s.passPurchaseId && s.status === 'cancelled') continue;
     const prev = byMember.get(s.memberId);
     if (!prev || +new Date(s.startedAt) > +new Date(prev.startedAt)) byMember.set(s.memberId, s);
   }
