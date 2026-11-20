@@ -1,8 +1,35 @@
-# Programmes API (P1, slice B1: authoring)
+# Programmes API (P1: authoring B1, members B2)
 
 Spec: parent repo `docs/specs/programmes-nutrition.md` §4. Plan: parent repo `docs/plans/programmes-p1-plan.md` (slice B1, decisions PD-1..PD-11).
 
-Members can't see programmes yet. The member routes (catalogue, starting a programme) are slice B2 and answer `404 feature_disabled` while `PROGRAMMES_CATALOGUE` is off. The admin routes below work while it is off, so programmes can be prepared before launch.
+The member routes answer `404 feature_disabled` while `PROGRAMMES_CATALOGUE` is off. That check runs before the sign-in check. The admin routes work while the flag is off, so programmes can be prepared before launch.
+
+## Member routes (slice B2)
+
+All need the flag and then `requireAuth('member')`. Any signed-in member can see and start free programmes (PD-2).
+
+| Route | What it does |
+|---|---|
+| `GET /programmes` | Live programmes, newest first, without their days.<br>Filters: `goal`, `level`, `environment` (a programme for `any` place matches every place), `minDays`, `maxDays`, and `lang` (`en`\|`sw`).<br>Each item has `dayCounts { gym, home, rest }`, `dayTypes[]` and `free: true`.<br>A bad filter answers 400 `invalid_filter` + `field` |
+| `GET /programmes/:id` | One live programme with `days[]`: `{ day, type, workout: { name, activityType, estimatedDuration, exerciseCount } \| null }`.<br>A draft, retired or missing programme answers 404 |
+| `POST /programmes/:id/enrol` | Body: `{ startDate?, replace?, lang? }`. Answers 201 `{ plan }`.<br>Errors:<br>• 409 `active_plan_exists` + `planId` (send `replace: true`)<br>• 409 `already_on_programme` + `planId`<br>• 409 `programme_unavailable` (a draft or retired programme)<br>• 404 `not_found`<br>• 400 `invalid_start_date`, `start_in_past` or `start_too_far` (start must be today to today + 30) |
+
+### The member's programme plan
+
+Starting a programme creates an ordinary `TrainingPlan` with `programmeId`, `lengthDays` and `engine: 'programme'`.
+- **Plan name:** the programme title, in Swahili when `lang=sw`.
+- **Workouts:** home days and gym days with a suggested workout become planned `Workout` rows, `source: 'programme'`.
+- **Replacing a plan:** this ends the member's current plan. Its unstarted workouts are removed; finished ones stay in history. This is the same as the existing plan rules (PD-1).
+
+`GET /me/training-plans/current` and `/me/training-plans/:id` return the plan with extra programme fields. These are additive; other plans are unchanged.
+- **Every day is listed**, `weeks[].days[]`, as `{ day (weekday, 1 = Monday), programmeDay, date, type, name, workoutId, status, completedBy }`.
+- **`status`** is `rest`, `planned`, `in_progress`, `completed`, `skipped` or `removed`.
+- **A gym day** is `completed` when its suggested workout is completed, or when a live `ProgrammeDayCompletion` exists for that date (check-in, slice B3). The check-in wins, and `completedBy` is then `{ source: 'checkin', checkinId, completedAt }`. Otherwise `completedBy` is `{ source: 'workout', workoutId }`.
+- **`progress`** adds `currentDay`, `lengthDays`, `byWorkout`, `byCheckin`, `streak` and `bestStreak`.
+  - The streak counts training days done in a row.
+  - Rest days don't break it, and today doesn't break it while today is still open. A past training day that wasn't done resets it.
+- **`today`** is today's day whatever its type, including a rest day. `next` is the next open training day.
+- **`GET /me/training-plans`:** for a programme, `sessions` doesn't count rest days.
 
 ## Admin routes
 
