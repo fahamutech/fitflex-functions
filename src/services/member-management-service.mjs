@@ -564,6 +564,8 @@ export function createMemberManagementService({
       subscriptionId: sub.id ?? null,
       businessDate: today,
       source: CHECKIN_SOURCE.OWNER_MANUAL,
+      // A visit on a custom pass's child subscription is attributed to that pass and person (as the QR path does).
+      ...(sub.passPurchaseId ? { passPurchaseId: sub.passPurchaseId, beneficiaryId: sub.passBeneficiaryId ?? null } : {}),
     };
     try {
       await checkins.insertAsync(row);
