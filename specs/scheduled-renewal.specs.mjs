@@ -12,6 +12,11 @@ import { settingsWithTiers } from './fixtures/tier-settings.mjs';
 const DAY = 86_400_000;
 const NOW = new Date('2026-11-15T09:00:00Z');
 const at = (days) => new Date(+NOW + days * DAY).toISOString();
+// The service tests below hit paths that read the real clock (createAdminPaymentService
+// has no `now` injection; /me computes status with the default clock), so their fixtures
+// are built from the real time; a fixed date stops being 'early' / 'active' once it passes.
+const REAL_NOW = new Date();
+const atReal = (days) => new Date(+REAL_NOW + days * DAY).toISOString();
 
 function memStore(rows = []) {
   return {
@@ -28,8 +33,8 @@ function memStore(rows = []) {
     },
   };
 }
-const running = (over = {}) => ({ id: 'sub_old', memberId: 'm1', type: 'platform_pass', tier: 'basic', status: 'active', startedAt: at(-27), cycleStartedAt: at(-27), expiresAt: at(3), renewsAt: at(3), ...over });
-const pending = (over = {}) => ({ id: 'sub_new', memberId: 'm1', type: 'platform_pass', tier: 'basic', status: 'payment_pending', startedAt: at(0), expiresAt: at(30), ...over });
+const running = (over = {}, t = at) => ({ id: 'sub_old', memberId: 'm1', type: 'platform_pass', tier: 'basic', status: 'active', startedAt: t(-27), cycleStartedAt: t(-27), expiresAt: t(3), renewsAt: t(3), ...over });
+const pending = (over = {}, t = at) => ({ id: 'sub_new', memberId: 'm1', type: 'platform_pass', tier: 'basic', status: 'payment_pending', startedAt: t(0), expiresAt: t(30), ...over });
 
 test('activation dates: from now, or from notBefore when it is later; length kept', () => {
   const d = activationDates(pending(), NOW);
@@ -80,8 +85,8 @@ test('a scheduled plan is not the current one until it starts; then it is promot
 });
 
 test('admin approval of an early renewal schedules it; the activation events wait for its start', async () => {
-  const subscriptions = memStore([running(), pending()]);
-  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: at(0) }]);
+  const subscriptions = memStore([running({}, atReal), pending({}, atReal)]);
+  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: atReal(0) }]);
   const events = [];
   const svc = createAdminPaymentService({
     paymentRequests, subscriptions, users: memStore(), auditLog: { async insertAsync() {} },
@@ -99,8 +104,8 @@ test('admin approval of an early renewal schedules it; the activation events wai
 });
 
 test('with SCHEDULED_RENEWALS off, an early renewal starts at payment as before', async () => {
-  const subscriptions = memStore([running(), pending()]);
-  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: at(0) }]);
+  const subscriptions = memStore([running({}, atReal), pending({}, atReal)]);
+  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: atReal(0) }]);
   const svc = createAdminPaymentService({ paymentRequests, subscriptions, users: memStore(), auditLog: { async insertAsync() {} } });
   await svc.decide({ id: 'pay_1', decision: 'approve', reference: 'TXN', actorId: 'adm', amountTzs: 60_000, automated: true });
   assert.equal(subscriptions.rows[1].status, 'active');
@@ -109,8 +114,8 @@ test('with SCHEDULED_RENEWALS off, an early renewal starts at payment as before'
 });
 
 test('with no running plan, approval activates as before', async () => {
-  const subscriptions = memStore([pending()]);
-  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: at(0) }]);
+  const subscriptions = memStore([pending({}, atReal)]);
+  const paymentRequests = memStore([{ id: 'pay_1', memberId: 'm1', subscriptionId: 'sub_new', tier: 'basic', amountTzs: 60_000, status: 'pending', provider: 'admin_approved', reference: null, requestedAt: atReal(0) }]);
   const events = [];
   const svc = createAdminPaymentService({
     paymentRequests, subscriptions, users: memStore(), auditLog: { async insertAsync() {} },
@@ -124,10 +129,10 @@ test('with no running plan, approval activates as before', async () => {
 });
 
 test('one renewal may wait at a time; /me lists it and promotes it when it starts', async () => {
-  const sched = { ...pending({ id: 'sub_sched' }), status: SCHEDULED, startedAt: at(3), cycleStartedAt: at(3), expiresAt: at(33), renewsAt: at(33) };
-  const subscriptions = memStore([running(), sched]);
+  const sched = { ...pending({ id: 'sub_sched' }, atReal), status: SCHEDULED, startedAt: atReal(3), cycleStartedAt: atReal(3), expiresAt: atReal(33), renewsAt: atReal(33) };
+  const subscriptions = memStore([running({}, atReal), sched]);
   const tiers = [{ key: 'basic', label: 'basic', monthlyPrice: 60_000, visits: 20, gymAccess: 'standard' }];
-  let clock = +NOW;
+  let clock = +REAL_NOW;
   const svc = createSubscriptionService({
     subscriptions, paymentRequests: memStore(), checkins: memStore(), gyms: [],
     settingsService: settingsWithTiers(tiers), publicUserId: async () => 'FF-1',
@@ -137,8 +142,8 @@ test('one renewal may wait at a time; /me lists it and promotes it when it start
   assert.equal((await svc.subscribe({ memberId: 'm1', tier: 'basic' })).error, 'renewal_already_scheduled');
   let me = await svc.me({ id: 'm1', userType: 'member' });
   assert.equal(me.subscription.id, 'sub_old');
-  assert.deepEqual(me.scheduledRenewals.map((r) => [r.id, r.startsAt]), [['sub_sched', at(3)]]);
-  clock = +NOW + 3.5 * DAY;
+  assert.deepEqual(me.scheduledRenewals.map((r) => [r.id, r.startsAt]), [['sub_sched', atReal(3)]]);
+  clock = +REAL_NOW + 3.5 * DAY;
   me = await svc.me({ id: 'm1', userType: 'member' });
   assert.equal(me.subscription.id, 'sub_sched');
   assert.equal(me.subscription.status, 'active');

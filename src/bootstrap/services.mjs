@@ -146,6 +146,9 @@ import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createHeldPaymentsService } from '../services/held-payments-service.mjs';
 import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
+import { programmesCatalogueOn } from '../shared/feature-flags.mjs';
+import { createProgrammeService } from '../services/training/programme-service.mjs';
+import { exerciseById } from '../shared/exercise-library.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
@@ -239,7 +242,7 @@ import {
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   memberUsernames, usernameReleases,
-  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, gymMemberSharing, challenges, challengeParticipants,
+  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, programmes, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
@@ -1144,6 +1147,14 @@ export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
   trainers, relationships: trainerMemberRelationships,
   notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Programmes P1 (B1): FitFlex's authoring of published day-by-day programmes. Works while
+// PROGRAMMES_CATALOGUE is off, so they can be prepared before launch.
+export const programmeService = createProgrammeService({
+  programmes, plans: trainingPlans, auditLog,
+  exerciseExists: id => Boolean(exerciseById(id)?.active),
+  ensureLibrary: () => exerciseAdminService.ensureFresh(),
+  catalogueOn: programmesCatalogueOn,
 });
 export const trainerPlanService = createTrainerPlanService({
   plans: trainingPlans, workouts, users, relationships: trainerMemberRelationships, trainers, workoutPlans,
