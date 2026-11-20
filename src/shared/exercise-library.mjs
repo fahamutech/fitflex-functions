@@ -420,6 +420,21 @@ export const EXERCISES = [
 const within = (list, allowed) => Array.isArray(list) && list.every(x => allowed.includes(x));
 const positive = n => Number.isInteger(n) && n > 0;
 
+/**
+ * A demo clip or still image link: https only, no credentials, at most 500 characters.
+ * Where clips are hosted is still open (owner decision PD-4), so any https host is accepted;
+ * only portal staff with the exercises scope can set one.
+ */
+export function isMediaLink(v) {
+  if (typeof v !== 'string' || v.length > 500) return false;
+  try {
+    const u = new URL(v);
+    return u.protocol === 'https:' && !u.username && !u.password && Boolean(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Why an entry is not a valid exercise, or null when it is. */
 export function exerciseProblem(e, ids = new Set(liveExercises().map(x => x.id))) {
   if (!e || typeof e !== 'object') return 'not_an_object';
@@ -440,6 +455,8 @@ export function exerciseProblem(e, ids = new Set(liveExercises().map(x => x.id))
   if (!Array.isArray(e.instructions) || !e.instructions.length || !e.instructions.every(s => typeof s === 'string' && s.trim())) return 'instructions';
   if (!Array.isArray(e.alternatives) || e.alternatives.includes(e.id) || !e.alternatives.every(a => ids.has(a))) return 'alternatives';
   if (typeof e.active !== 'boolean') return 'active';
+  if (e.clipUrl != null && !isMediaLink(e.clipUrl)) return 'clipUrl';
+  if (e.stillUrl != null && !isMediaLink(e.stillUrl)) return 'stillUrl';
   return null;
 }
 

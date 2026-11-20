@@ -14,7 +14,7 @@ import { csvToExerciseRows, exercisesToCsv } from '../../shared/exercise-csv.mjs
 const FIELDS = [
   'name', 'description', 'category', 'targetAreas', 'secondaryAreas', 'movementPattern', 'difficulty',
   'equipment', 'environment', 'suitableGoals', 'defaultSets', 'defaultReps', 'defaultDuration', 'restSeconds',
-  'tracksWeight', 'instructions', 'alternatives', 'active', 'i18n',
+  'tracksWeight', 'instructions', 'alternatives', 'active', 'i18n', 'clipUrl', 'stillUrl',
 ];
 const LANGS = ['sw'];
 const MAX = { name: 80, description: 240, instruction: 240, instructions: 8, alternatives: 6 };
@@ -26,6 +26,7 @@ const MAX_IMPORT_CHARS = 1_000_000;
 const FIELD_OF = { defaultReps: 'defaultReps_or_defaultDuration', defaultDuration: 'defaultReps_or_defaultDuration' };
 
 const text = (v, max) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null);
+const link = v => (typeof v === 'string' && v.trim() ? v.trim() : null);
 const slug = name => String(name).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
 
 /** Tidy what an admin sent into a whole exercise, on top of what was there. */
@@ -66,6 +67,9 @@ function shape(id, body, prior = {}) {
     alternatives: Array.isArray(pick('alternatives')) ? [...new Set(pick('alternatives'))] : [],
     active: pick('active') !== false,
     ...(Object.keys(i18n).length ? { i18n } : {}),
+    // Demo clip and still image (FR-P05). Blank clears; a bad link is refused by exerciseProblem.
+    ...(link(pick('clipUrl')) ? { clipUrl: link(pick('clipUrl')) } : {}),
+    ...(link(pick('stillUrl')) ? { stillUrl: link(pick('stillUrl')) } : {}),
   };
 }
 
@@ -75,7 +79,7 @@ export function createExerciseAdminService({ exercises, auditLog = null, now = (
 
   /** A stored row as a plain exercise: no bookkeeping, no empty columns. */
   const strip = ({ source, updatedAt, updatedBy, createdAt, ...e }) =>
-    Object.fromEntries(Object.entries(e).filter(([k, v]) => !(v == null && ['defaultReps', 'defaultDuration', 'i18n'].includes(k))));
+    Object.fromEntries(Object.entries(e).filter(([k, v]) => !(v == null && ['defaultReps', 'defaultDuration', 'i18n', 'clipUrl', 'stillUrl'].includes(k))));
 
   /** Read FitFlex's changes and make the merged library the live one. */
   async function load() {
@@ -140,6 +144,7 @@ export function createExerciseAdminService({ exercises, auditLog = null, now = (
       ...row,
       // Said outright, so switching between reps and time (or dropping a translation) clears the old value.
       defaultReps: row.defaultReps ?? null, defaultDuration: row.defaultDuration ?? null, i18n: row.i18n ?? null,
+      clipUrl: row.clipUrl ?? null, stillUrl: row.stillUrl ?? null,
       updatedAt: stamp, updatedBy: actorId ?? null, ...(existing ? {} : { createdAt: stamp }),
     };
     if (existing) await exercises.updateByIdAsync(row.id, full);
