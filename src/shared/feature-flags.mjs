@@ -778,3 +778,13 @@ export function securityReportMaxPerDay() {
 export function adminReasonsRequiredOn() {
   return on('ADMIN_REASONS_REQUIRED');
 }
+
+/**
+ * Programmes P1 (docs/specs/programmes-nutrition.md in the parent repo): free day-by-day programmes members can
+ * start, and gym days completed by a check-in. Off unless PROGRAMMES_CATALOGUE is set: member routes answer 404
+ * feature_disabled. FitFlex's authoring screens (/admin/programmes*) work while it is off, so programmes can be
+ * prepared before launch; they report the flag as `catalogueOn`.
+ */
+export function programmesCatalogueOn() {
+  return on('PROGRAMMES_CATALOGUE');
+}
