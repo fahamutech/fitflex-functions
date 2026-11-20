@@ -85,12 +85,23 @@ Rules:
 - **Hosting and licence:** both still open (PD-4), so any https host is accepted for now.
 - **CSV:** the export and import don't carry these two columns yet. An import leaves them as they are.
 
+## Check-ins complete gym days (slice B3)
+
+No new endpoint. A recorded visit marks the gym day of the member's active programme done, and the plan answers (`GET /training/plans/current` and the plan list) show it as `completedBy: { source: 'checkin', checkinId, completedAt }`.
+
+- **Which visits:** gym QR, staff scan, web check-in and sponsor-funded visits (`onCheckin` in `checkInService`), and visits the owner records by hand (PD-6; a new `onManualVisit` hook in `memberManagement.checkInMember`).
+- **Which days:** only a `gym` day of an active programme plan, on the visit's East Africa business day. A visit on a home or rest day, or outside the programme, is not counted (PD-5).
+- **Same day twice:** one completion, for the first visit.
+- **Void:** voiding the visit reopens the day (`reversedAt`, `reversedReason`). If another visit that day still stands, the day stays done and points at that visit instead.
+- **Safety:** the reaction never throws and runs after the visit is saved, so it cannot fail or hold up a check-in or a void.
+- **Flag:** does nothing while `PROGRAMMES_CATALOGUE` is off, including on a void.
+
 ## Tables (migration `20270218090000-programmes`)
 
 - **`Programme`.**
 - **`TrainingPlan.programmeId`** and **`TrainingPlan.lengthDays`**.
 - **`ProgrammeDayCompletion`:**
-  - used from slice B3, when a check-in completes a gym day;
+  - written from slice B3, when a check-in completes a gym day;
   - at most one live row per plan day, with `reversedAt` set on a void.
 - **`TrainingExercise.clipUrl`** and **`TrainingExercise.stillUrl`**.
 

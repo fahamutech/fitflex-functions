@@ -23,6 +23,8 @@ export function createMemberManagementService({
   publicUserId,
   // A membership started or was renewed here (lifecycle automations).
   onMembershipActivated = async () => {},
+  // A visit the owner recorded by hand (Programmes B3, PD-6). Fire-and-forget: never fails the visit.
+  onManualVisit = async () => {},
   initFirebaseAdmin,
   getAdminAuth,
 }) {
@@ -576,6 +578,7 @@ export function createMemberManagementService({
       if (!first) throw err;
       return { ok: true, checkin: publicCheckin(first), idempotent: true };
     }
+    Promise.resolve().then(() => onManualVisit(row)).catch(() => {});
     return { ok: true, checkin: publicCheckin(row) };
   }
 

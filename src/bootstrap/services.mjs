@@ -148,6 +148,7 @@ import { createHeldPaymentsService } from '../services/held-payments-service.mjs
 import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
 import { programmesCatalogueOn } from '../shared/feature-flags.mjs';
 import { createProgrammeService } from '../services/training/programme-service.mjs';
+import { createProgrammeCheckinService } from '../services/training/programme-checkin-service.mjs';
 import { exerciseById } from '../shared/exercise-library.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
@@ -767,10 +768,17 @@ export const securityEventService = createSecurityEventService({
   reportsOn: securityIncidentReportsOn,
   reportsFor: (userId, ids) => securityIncidentService.reportsFor(userId, ids),
 });
+// Programmes (B3): a visit on a programme's gym day marks that day done; a void reopens it.
+// Never throws; does nothing while PROGRAMMES_CATALOGUE is off.
+export const programmeCheckins = createProgrammeCheckinService({
+  plans: trainingPlans, dayCompletions: programmeDayCompletions, checkins, enabled: programmesCatalogueOn,
+});
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
-  // Two independent reactions; neither can block or fail the other or the check-in (S3: web check-in security alert).
-  onCheckin: checkin => Promise.allSettled([partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin)]),
+  // Independent reactions; none can block or fail another or the check-in (S3: web check-in security alert; B3: programme gym day).
+  onCheckin: checkin => Promise.allSettled([
+    partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin), programmeCheckins.recordCheckin(checkin),
+  ]),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
@@ -784,6 +792,8 @@ export const checkinStatusService = createCheckinStatusService({
   checkins, auditLog,
   // Voiding a visit gives its B2B allowance back.
   onVoided: async ({ checkin, reason, actorId }) => {
+    // Reopens a programme gym day the visit had completed (never throws).
+    await programmeCheckins.reverseCheckin(checkin, reason);
     await b2bConsumptionService.releaseForSource({
       sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
     });
@@ -818,6 +828,7 @@ const usernamesLazy = { handleOf: userId => usernameService.handleOf(userId) };
 export const memberManagement = createMemberManagementService({
   usernames: usernamesLazy, users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
   onMembershipActivated: lifecycle.activated,
+  onManualVisit: row => programmeCheckins.recordCheckin(row),
 });
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
