@@ -242,7 +242,7 @@ import {
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   memberUsernames, usernameReleases,
-  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, programmes, gymMemberSharing, challenges, challengeParticipants,
+  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, programmes, programmeDayCompletions, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
@@ -1145,7 +1145,7 @@ export const workoutExerciseService = createWorkoutExerciseService({
 });
 export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
-  trainers, relationships: trainerMemberRelationships,
+  trainers, relationships: trainerMemberRelationships, dayCompletions: programmeDayCompletions,
   notify: (userId, message) => notificationService.notify(userId, message),
 });
 // Programmes P1 (B1): FitFlex's authoring of published day-by-day programmes. Works while
