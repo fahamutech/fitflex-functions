@@ -252,5 +252,82 @@ export function createProgrammeService({
     return { programme: { ...row, enrolled: 0 } };
   }
 
-  return { list, get, create, update, publish, retire, duplicate };
+  // ── Members (slice B2): live programmes only ───────────────────────────────
+
+  /**
+   * A programme as a member sees it: no authoring fields, title and summary
+   * in their language (Swahili falls back to English), and each day's
+   * workout reduced to what the catalogue and detail screens show.
+   */
+  function memberView(p, lang = 'en', { withDays = true } = {}) {
+    const t = lang === 'sw' ? (p.i18n?.sw ?? {}) : {};
+    const days = p.days ?? [];
+    const count = type => days.filter(d => d.type === type).length;
+    return {
+      id: p.id,
+      title: t.title ?? p.title,
+      summary: t.summary ?? p.summary ?? null,
+      goal: p.goal, level: p.level, environment: p.environment, equipment: p.equipment ?? [],
+      lengthDays: p.lengthDays,
+      dayCounts: { gym: count('gym'), home: count('home'), rest: count('rest') },
+      // The day types in order ("hrhg…"), for the card's day strip.
+      dayTypes: days.map(d => d.type),
+      // P1 programmes are all free; P3 adds paid ones.
+      free: true,
+      publishedAt: p.publishedAt ?? null,
+      ...(withDays ? {
+        days: days.map(d => ({
+          day: d.day, type: d.type,
+          workout: d.workout ? {
+            name: d.workout.name, activityType: d.workout.activityType,
+            estimatedDuration: d.workout.estimatedDuration ?? null, exerciseCount: d.workout.exercises?.length ?? 0,
+          } : null,
+        })),
+      } : {}),
+    };
+  }
+
+  /**
+   * Live programmes for the catalogue, newest first. Filters (all optional):
+   * goal, level, environment (a programme for `any` place matches every
+   * place), minDays / maxDays (inclusive).
+   */
+  async function catalogue(query = {}) {
+    const minDays = query.minDays != null ? Number(query.minDays) : null;
+    const maxDays = query.maxDays != null ? Number(query.maxDays) : null;
+    if (minDays != null && !Number.isInteger(minDays)) return fail('minDays', 'invalid_filter');
+    if (maxDays != null && !Number.isInteger(maxDays)) return fail('maxDays', 'invalid_filter');
+    if (query.goal && !FITNESS_GOAL_IDS.includes(query.goal)) return fail('goal', 'invalid_filter');
+    if (query.level && !EXPERIENCE_LEVELS.includes(query.level)) return fail('level', 'invalid_filter');
+    if (query.environment && !ENVIRONMENTS.includes(query.environment)) return fail('environment', 'invalid_filter');
+    const rows = (await programmes.allAsync()).filter(p => p.status === 'live'
+      && (!query.goal || p.goal === query.goal)
+      && (!query.level || p.level === query.level)
+      && (!query.environment || query.environment === 'any' || p.environment === query.environment || p.environment === 'any')
+      && (minDays == null || p.lengthDays >= minDays)
+      && (maxDays == null || p.lengthDays <= maxDays));
+    rows.sort((a, b) => String(b.publishedAt ?? '').localeCompare(String(a.publishedAt ?? '')));
+    return { programmes: rows.map(p => memberView(p, query.lang, { withDays: false })) };
+  }
+
+  /** One live programme for a member, or 404 (drafts and retired ones are not shown). */
+  async function forMember(id, lang) {
+    const p = await programmes.findByIdAsync(id);
+    if (!p || p.status !== 'live') return { error: 'not_found', status: 404 };
+    return { programme: memberView(p, lang) };
+  }
+
+  /**
+   * The whole live programme to start (days with their workouts), or why
+   * not: 404 when it never existed, 409 programme_unavailable when it is a
+   * draft or was retired.
+   */
+  async function startable(id) {
+    const p = await programmes.findByIdAsync(id);
+    if (!p) return { error: 'not_found', status: 404 };
+    if (p.status !== 'live') return { error: 'programme_unavailable', status: 409 };
+    return { programme: p };
+  }
+
+  return { list, get, create, update, publish, retire, duplicate, catalogue, forMember, startable, memberView };
 }

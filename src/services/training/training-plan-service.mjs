@@ -72,6 +72,8 @@ export function createTrainingPlanService({
   plans, workouts, users, engine,
   // For plans a trainer makes: who they are, whether the member still trains with them, and telling them the answer.
   trainers = null, relationships = null, notify = async () => {},
+  // Programmes: gym days done by a check-in (ProgrammeDayCompletion rows; written from slice B3).
+  dayCompletions = null,
   now = () => new Date(),
 }) {
   const today = () => localDay(now());
@@ -94,6 +96,7 @@ export function createTrainingPlanService({
 
   /** The plan with its sessions' current state and where the member stands. */
   async function view(plan) {
+    if (plan.programmeId) return programmeView(plan);
     const rows = await sessionsOf(plan);
     const byId = new Map(rows.map(w => [w.id, w]));
     const day = today();
@@ -161,6 +164,169 @@ export function createTrainingPlanService({
     const patch = { status, updatedAt: now().toISOString() };
     await plans.updateByIdAsync(plan.id, patch);
     return { ...plan, ...patch };
+  }
+
+  // ── Programmes (P1, slice B2) ─────────────────────────────────────────────
+  // A programme plan lists every day, 1..lengthDays on consecutive dates:
+  //   { day (weekday, 1 = Monday), programmeDay, date, type: gym | home | rest, name, workoutId | null }
+  // Home days and gym days with a suggested workout have a Workout; a gym
+  // day is also done by a check-in that day (ProgrammeDayCompletion, B3).
+
+  /** The member's programme plan: every day's state, progress, streaks and today. */
+  async function programmeView(plan) {
+    const rows = await sessionsOf(plan);
+    const byId = new Map(rows.map(w => [w.id, w]));
+    const done = dayCompletions
+      ? (await dayCompletions.filterByColumnAsync('planId', plan.id)).filter(c => !c.reversedAt)
+      : [];
+    const checkinOn = new Map(done.map(c => [c.date, c]));
+    const day = today();
+    const weeks = plan.weeks.map(w => ({
+      week: w.week,
+      days: w.days.map(({ workout: _pending, ...d }) => {
+        const type = d.type ?? 'home';
+        if (type === 'rest') {
+          return { ...d, type, workoutId: null, status: 'rest', estimatedDuration: null, exerciseCount: 0, completedBy: null };
+        }
+        const workout = d.workoutId ? byId.get(d.workoutId) : null;
+        const visit = type === 'gym' ? checkinOn.get(d.date) : null;
+        // A gym day without a suggested workout is only ever done by a check-in.
+        let status = d.workoutId ? (workout?.status ?? 'removed') : 'planned';
+        let completedBy = workout?.status === 'completed' ? { source: 'workout', workoutId: workout.id } : null;
+        if (visit) {
+          status = 'completed';
+          completedBy = { source: 'checkin', checkinId: visit.checkinId ?? null, completedAt: visit.completedAt };
+        }
+        return {
+          ...d, type,
+          workoutId: workout ? d.workoutId : null,
+          name: workout?.name ?? d.name ?? null,
+          status,
+          estimatedDuration: workout?.estimatedDuration ?? null,
+          exerciseCount: workout?.exercises?.length ?? 0,
+          completedBy,
+        };
+      }),
+    }));
+    const every = weeks.flatMap(w => w.days).sort((a, b) => a.date.localeCompare(b.date));
+    const training = every.filter(d => d.status !== 'rest' && d.status !== 'removed');
+    const open = training.filter(d => d.status === 'planned' || d.status === 'in_progress');
+    const completed = training.filter(d => d.status === 'completed');
+
+    // Streak: training days done in a row, rest days not breaking it; a past day not done does.
+    let run = 0; let best = 0; let current = 0;
+    for (const d of training) {
+      if (d.date > day) break;
+      if (d.status === 'completed') { run += 1; best = Math.max(best, run); current = run; continue; }
+      if (d.date === day) continue; // today is still open
+      run = 0; current = 0;
+    }
+    const sinceStart = Math.round((Date.parse(`${day}T00:00:00Z`) - Date.parse(`${plan.startDate}T00:00:00Z`)) / 86_400_000);
+    const length = plan.lengthDays ?? every.length;
+    return {
+      ...plan,
+      weeks,
+      trainer: null,
+      progress: {
+        sessions: training.length,
+        completed: completed.length,
+        skipped: training.filter(d => d.status === 'skipped').length,
+        missed: open.filter(d => d.date < day).length,
+        completionRate: training.length ? Math.round((completed.length / training.length) * 100) / 100 : 0,
+        currentWeek: Math.min(Math.max(Math.floor(sinceStart / 7) + 1, 1), plan.durationWeeks),
+        currentDay: Math.min(Math.max(sinceStart + 1, 1), length),
+        lengthDays: length,
+        byWorkout: completed.filter(d => d.completedBy?.source === 'workout').length,
+        byCheckin: completed.filter(d => d.completedBy?.source === 'checkin').length,
+        streak: current,
+        bestStreak: best,
+      },
+      // Today's day whatever its type (a rest day too), so the app can say so.
+      today: every.find(d => d.date === day) ?? null,
+      next: open.filter(d => d.date > day)[0] ?? null,
+    };
+  }
+
+  /**
+   * Start a FitFlex programme (a live Programme row, checked by the caller).
+   * Body (all optional): `startDate` (today .. today + 30), `replace` (end
+   * the plan the member is on), `lang` (en | sw: the language of the plan's
+   * name). The member's plan rules are the same as for a recommended plan.
+   */
+  async function startProgramme(memberId, programme, body = {}) {
+    const user = await users.findByIdAsync(memberId);
+    if (!user) return { error: 'not_found', status: 404 };
+    const startDate = body.startDate ?? today();
+    if (!DATE_RE.test(startDate) || Number.isNaN(Date.parse(`${startDate}T00:00:00Z`))) return { error: 'invalid_start_date', status: 400 };
+    if (startDate < today()) return { error: 'start_in_past', status: 400 };
+    if (startDate > addPlanDays(today(), MAX_START_AHEAD_DAYS)) return { error: 'start_too_far', status: 400 };
+
+    const current = await activePlan(memberId);
+    if (current?.programmeId === programme.id) return { error: 'already_on_programme', status: 409, planId: current.id };
+    if (current && body.replace !== true) return { error: 'active_plan_exists', status: 409, planId: current.id };
+
+    const stamp = now();
+    const planId = `tpn_${randomUUID().slice(0, 12)}`;
+    const rows = [];
+    const days = programme.days.map(d => {
+      const date = addPlanDays(startDate, d.day - 1);
+      let workoutId = null;
+      if (d.type !== 'rest' && d.workout) {
+        const row = newWorkoutRow({
+          memberId, base: { id: null, ...d.workout }, scheduledDate: date, trainingPlanId: planId, source: 'programme', now: stamp,
+        });
+        rows.push(row);
+        workoutId = row.id;
+      }
+      return { day: planWeekday(date), programmeDay: d.day, date, type: d.type, name: d.workout?.name ?? null, workoutId };
+    });
+    const weeks = [];
+    for (const d of days) {
+      const week = Math.ceil(d.programmeDay / 7);
+      if (!weeks[week - 1]) weeks[week - 1] = { week, days: [] };
+      weeks[week - 1].days.push(d);
+    }
+    const durationWeeks = Math.ceil(programme.lengthDays / 7);
+    const trainingDays = programme.days.filter(d => d.type !== 'rest').length;
+    const minutes = rows.map(r => r.estimatedDuration).filter(n => n > 0);
+    const name = (body.lang === 'sw' && programme.i18n?.sw?.title) || programme.title;
+
+    if (current) await end(current, 'cancelled');
+    const plan = {
+      id: planId,
+      userId: memberId,
+      name,
+      goal: programme.goal,
+      targetAreas: [],
+      experience: programme.level,
+      environment: programme.environment,
+      equipment: programme.equipment ?? [],
+      style: null,
+      durationWeeks,
+      daysPerWeek: Math.min(7, Math.max(1, Math.round(trainingDays / durationWeeks))),
+      sessionMinutes: minutes.length ? Math.round(minutes.reduce((a, b) => a + b, 0) / minutes.length) : 30,
+      status: 'active',
+      createdByType: 'fitflex',
+      createdById: null,
+      trainerId: null,
+      engine: 'programme',
+      programmeId: programme.id,
+      lengthDays: programme.lengthDays,
+      startDate,
+      endDate: addPlanDays(startDate, programme.lengthDays - 1),
+      weeks,
+      createdAt: stamp.toISOString(),
+      updatedAt: stamp.toISOString(),
+    };
+    await plans.insertAsync(plan);
+    try {
+      for (const row of rows) await workouts.insertAsync(row);
+    } catch (err) {
+      for (const row of rows) await workouts.removeByIdAsync(row.id).catch(() => {});
+      await plans.removeByIdAsync(planId).catch(() => {});
+      throw err;
+    }
+    return { plan: await view(plan) };
   }
 
   /**
@@ -268,7 +434,8 @@ export function createTrainingPlanService({
       if (p.status !== 'offered' && p.status !== 'declined') rows.push(await settle(p));
     }
     rows.sort((a, b) => b.startDate.localeCompare(a.startDate) || +new Date(b.createdAt) - +new Date(a.createdAt));
-    return { plans: rows.map(({ weeks, ...p }) => ({ ...p, sessions: weeks.reduce((n, w) => n + w.days.length, 0) })) };
+    // A programme lists its rest days too; they are not sessions.
+    return { plans: rows.map(({ weeks, ...p }) => ({ ...p, sessions: weeks.reduce((n, w) => n + w.days.filter(d => d.type !== 'rest').length, 0) })) };
   }
 
   async function own(memberId, id) {
@@ -407,5 +574,5 @@ export function createTrainingPlanService({
     return { declined: true };
   }
 
-  return { generate, current, list, get, cancel, offers, accept, decline, viewPlan: view, endPlan: end };
+  return { generate, current, list, get, cancel, offers, accept, decline, startProgramme, viewPlan: view, endPlan: end };
 }

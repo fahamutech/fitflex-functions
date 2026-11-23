@@ -155,7 +155,11 @@ function scheduleOf(raw) {
 
 export const BLOCKED_CACHE_MS = 5000;
 
-export function createWebGymProfileService({ gymService, settingsService, trainerService, moderationGate, partnerGate, now = Date.now }) {
+/**
+ * `gymPasses` (optional): async gymId → the gym's active custom passes in their public shape (GYM_CUSTOM_PASSES), or
+ * [] while that flag is off. Without it the answer carries an empty list.
+ */
+export function createWebGymProfileService({ gymService, settingsService, trainerService, moderationGate, partnerGate, gymPasses = null, now = Date.now }) {
   // The moderation set is scanned at most once every few seconds, not once a request.
   let blockedCache = { at: -Infinity, set: new Set() };
   async function blockedGyms() {
@@ -209,6 +213,28 @@ export function createWebGymProfileService({ gymService, settingsService, traine
     });
   }
 
+  /**
+   * The gym's own custom passes as the page lists them and the buy step needs them: `planId` is what a signed-in member
+   * sends to POST /me/gym-pass-purchases. Never the gym id. A failed lookup shows no passes, it does not fail the page.
+   */
+  async function customPassesOf(gym) {
+    if (!gymPasses) return [];
+    let plans = [];
+    try { plans = await gymPasses(gym.id); } catch { plans = []; }
+    return (Array.isArray(plans) ? plans : []).slice(0, MAX_LIST).map(p => ({
+      planId: p.id,
+      name: text(p.name, 120),
+      description: text(p.description, 500),
+      category: p.category,
+      durationValue: num(p.durationValue),
+      durationUnit: p.durationUnit,
+      beneficiaryLimit: num(p.beneficiaryLimit),
+      priceTzs: num(p.priceTzs),
+      terms: text(p.terms, 4000),
+      termsVersion: num(p.termsVersion),
+    })).filter(p => p.planId && p.name && p.priceTzs !== null);
+  }
+
   /** @returns the public profile or null (one answer for every kind of miss). */
   async function resolve({ q, lang } = {}) {
     const payload = extractQrPayload(q);
@@ -252,6 +278,7 @@ export function createWebGymProfileService({ gymService, settingsService, traine
         currency: 'TZS',
         gymPlans: plansOf(gym, L),
         passTiers: passTiersFor(gym, L),
+        gymPasses: await customPassesOf(gym),
       },
     };
   }
