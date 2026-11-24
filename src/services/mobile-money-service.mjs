@@ -71,6 +71,11 @@ const PLACEHOLDER = CLAIM_PLACEHOLDER;
 /** At most this many prompts per member / per phone in the window. */
 const LIMITS = { member: 5, phone: 3, windowMs: 10 * 60_000 };
 
+/** A bank checkout the bank refused (e.g. a wrong OTP) this many times closes the bank method for that request. */
+export const BANK_REJECTIONS_MAX = 5;
+/** The last four letters/digits of a bank account, for a dispute: "…7766". Never the whole number. */
+export const accountTail = (account) => `…${String(account ?? '').replace(/[^0-9A-Za-z]/g, '').slice(-4)}`;
+
 /** At most this many given-up transaction ids are remembered per request (the newest). */
 const SUPERSEDED_MAX = 10;
 
@@ -114,7 +119,8 @@ export function createMobileMoneyService({
   // { targets() → ['app', 'web'] (those that are configured), urls(target, request) → { successUrl, failUrl, origin } | null }.
   // Nothing a client sends ever becomes part of these addresses.
   pageReturn = null,
-  // A verified SUCCESS callback whose reference matches no payment request: ({ reference, transactionId, amountTzs }) → void.
+  // A verified SUCCESS callback whose reference matches no payment request:
+  // ({ reference, externalReference, transactionId, amountTzs }) → { isNew } | void (isNew false: already raised, counted there).
   onUnmatched = null,
   // Confirmed money that was not approved, for a request that is NOT an event order (those go to eventOrders.onHeld):
   // (request, reason, { transactionId, amountTzs }) → void. Wired to an ops exception in bootstrap. Best-effort.
@@ -246,6 +252,8 @@ export function createMobileMoneyService({
   /** The trimmed view of a request that goes back to the app. */
   const view = (r) => r && ({
     id: r.id, status: r.status, amountTzs: r.amountTzs, provider: r.provider, reference: r.reference ?? null,
+    // What is being paid for (FITFLEX_PASS, GYM_SUBSCRIPTION, EVENT_ORDER, …): the web return page links back to it.
+    productType: productTypeOfPayment(r),
   });
 
   /**
@@ -274,6 +282,9 @@ export function createMobileMoneyService({
       const code = toOtp(otp);
       if (!code) return fail('invalid_otp', 400);
       if (Number(request.amountTzs) > AZAMPAY_BANK_MAX_TZS) return fail('amount_over_bank_limit', 409, { maxTzs: AZAMPAY_BANK_MAX_TZS });
+      // Guessing an OTP: after this many refusals by the bank the bank method is closed for THIS request (the other
+      // methods are not). It stays closed until the request is recreated or staff reset the count.
+      if (Number(request.bankRejections ?? 0) >= BANK_REJECTIONS_MAX) return fail('bank_attempts_exhausted', 409, { max: BANK_REJECTIONS_MAX });
       return { msisdn, bank: chosen, accountNumber: account, otp: code };
     }
     if (!msisdn) return fail('invalid_phone', 400);
@@ -406,8 +417,11 @@ export function createMobileMoneyService({
         await audit('payment_mobile_money_uncertain', request.id, null, { code: err?.code || 'error', method });
         return fail('provider_unavailable', 503);
       }
-      await updateIf(paymentRequests, request.id, { provider: PROVIDER, reference: claim }, { provider: MANUAL, reference: null });
-      await audit('payment_mobile_money_failed_to_start', request.id, null, { code: err?.code || 'error', method });
+      // A bank refusal is counted on the request (BANK_REJECTIONS_MAX); the count is written with the release.
+      const refusedByBank = method === PAYMENT_METHODS.BANK && err?.code === 'rejected';
+      const rejections = Number(request.bankRejections ?? 0) + 1;
+      await updateIf(paymentRequests, request.id, { provider: PROVIDER, reference: claim }, { provider: MANUAL, reference: null, ...(refusedByBank ? { bankRejections: rejections } : {}) });
+      await audit('payment_mobile_money_failed_to_start', request.id, null, { code: err?.code || 'error', method, ...(refusedByBank ? { bankRejections: rejections } : {}) });
       if (err?.code === 'rejected') return fail('provider_rejected', 422);
       if (err?.code === 'unknown_network') return fail('network_required', 400);
       return fail('provider_unavailable', 503);
@@ -427,11 +441,11 @@ export function createMobileMoneyService({
       // What was used is on record (never the OTP, the account number or the phone): the method, and the bank or the wallet chosen.
       await audit('payment_mobile_money_requested', request.id, null, {
         transactionId, amountTzs: request.amountTzs, method,
-        ...(prepared.bank ? { bank: prepared.bank } : {}), ...(prepared.network ? { network: String(prepared.network).slice(0, 20) } : {}),
+        ...(prepared.bank ? { bank: prepared.bank, account: accountTail(prepared.accountNumber) } : {}), ...(prepared.network ? { network: String(prepared.network).slice(0, 20) } : {}),
       });
       // S4: the event payment becomes pending with the provider's transaction, and the hold is extended a little.
       if (request.eventOrderId) {
-        try { await eventOrders.afterPrompt(request, transactionId); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
+        try { await eventOrders.afterPrompt(request, transactionId, { page: method === PAYMENT_METHODS.PAGE }); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
       }
       return { status: 202, state: 'in_progress', paymentRequest: view(updated), method, ...(checkoutUrl ? { checkoutUrl } : {}) };
     } catch (err) {
@@ -561,6 +575,13 @@ export function createMobileMoneyService({
       return { state: 'completed', paymentRequest: view(out.paymentRequest) };
     }
     if (remote.status === 'FAILED') {
+      // A payment page stays open after a failed try and the payer can try again ON it: giving the request back now
+      // would let a retry on that page succeed with no attempt open (charged, then held). While the page is within
+      // its window the request keeps waiting on the page reference; the failure is only put on record.
+      if (request.provider === PROVIDER && request.reference === txn && request.checkoutUrl && parsePageReference(txn) && inFlight(request)) {
+        await audit('payment_mobile_money_page_try_failed', request.id, { reference: txn }, { why: remote.remark || 'failed', transactionId: settleAs ?? null });
+        return { state: 'in_progress', paymentRequest: view(request), remark: remote.remark, pageStillOpen: true };
+      }
       // Only an attempt we still hold is released; a late FAILED for an old one changes nothing.
       if (request.provider === PROVIDER && request.reference === txn) {
         await release(request, remote.remark || 'failed');
@@ -615,9 +636,16 @@ export function createMobileMoneyService({
       // Money AzamPay says it took, for a reference we cannot place: never dropped quietly. (Which field carries our
       // reference for bank and page payments is not documented; if it is not `utilityref`, this is where it shows.)
       if (parsed.confirmed?.status === 'COMPLETED') {
-        const detail = { reference: String(parsed.referenceId).slice(0, 140), transactionId: parsed.transactionId, amountTzs: parsed.confirmed.amountTzs };
-        await audit('payment_mobile_money_unmatched', detail.reference, null, { transactionId: detail.transactionId, amountTzs: detail.amountTzs });
-        try { await onUnmatched?.(detail); } catch (err) { console.warn('[mobile-money] staff were not told about an unmatched payment:', detail.transactionId, err?.message); }
+        // `reference` (utilityref) and `externalReference` are the signed fields; transid and the amount are not.
+        const ext = parsed.confirmed.raw?.externalreference;
+        const detail = {
+          reference: String(parsed.referenceId).slice(0, 140), externalReference: ext == null ? null : String(ext).slice(0, 140),
+          transactionId: parsed.transactionId, amountTzs: parsed.confirmed.amountTzs,
+        };
+        // Staff are told once per signed reference; a repeat is counted there and writes no further audit row.
+        let repeat = false;
+        try { repeat = (await onUnmatched?.(detail))?.isNew === false; } catch (err) { console.warn('[mobile-money] staff were not told about an unmatched payment:', detail.reference, err?.message); }
+        if (!repeat) await audit('payment_mobile_money_unmatched', detail.reference, null, { externalReference: detail.externalReference, transactionId: detail.transactionId, amountTzs: detail.amountTzs });
       }
       return { status: 200, ok: true, ignored: 'unknown_reference' };
     }

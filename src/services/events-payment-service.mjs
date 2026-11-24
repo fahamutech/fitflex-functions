@@ -24,6 +24,7 @@ import {
 } from '../shared/events-participants.mjs';
 import { normalizePaymentReference, DUPLICATE_ATTEMPT_ACTION, DUPLICATE_ATTEMPT_LIMIT } from '../shared/manual-payment.mjs';
 import { redactProviderPayload } from '../shared/events-payment-redact.mjs';
+import { PAGE_TTL_MS } from '../shared/mobile-money-claim.mjs';
 import { deriveToken, sha256hex, qrPayloadOf, displayCodeOf } from '../shared/events-ticket-token.mjs';
 import { paginate } from '../shared/pagination.mjs';
 import { swahiliTime } from '../shared/vendor-documents.mjs';
@@ -770,8 +771,8 @@ export function createEventsPaymentService({
       if (Number(request.amountTzs) !== Number(order.totalTzs) || Number(payment.amountTzs) !== Number(order.totalTzs) || (request.currency || 'TZS') !== 'TZS') return { error: 'order_amount_mismatch', status: 409, expectedTzs: Number(order.totalTzs) };
       return null;
     },
-    /** A prompt is on the phone: EventPayment created → pending, the provider transaction recorded, the hold extended. */
-    async afterPrompt(request, transactionId) {
+    /** A prompt is on the phone (or a payment page is open: `page`): EventPayment created → pending, the provider transaction recorded, the hold extended. */
+    async afterPrompt(request, transactionId, { page = false } = {}) {
       await db.transaction(async (trx) => {
         const payment = plain(await trx('EventPayment').where({ paymentRequestId: request.id }).forUpdate().first());
         if (!payment) return;
@@ -780,7 +781,8 @@ export function createEventsPaymentService({
         if (payment.status !== 'created') await trx('EventPayment').where({ id: payment.id }).update({ providerTransactionId: String(transactionId), updatedAt: at });
         const order = plain(await trx('EventOrder').where({ id: payment.orderId }).forUpdate().first());
         if (order.status === 'awaiting_payment') {
-          await money.extendHold(trx, order, { mode: 'provider', manualExtendMs: eventManualHoldExtendHours() * HOUR, providerExtendMs: eventsProviderHoldExtendMinutes() * MINUTE, maxHoursMs: eventManualHoldMaxHours() * HOUR });
+          // A payment page stays open for PAGE_TTL_MS: the places are held at least that long (a prompt: the provider rule). Never past the cap or the event's start.
+          await money.extendHold(trx, order, { mode: 'provider', manualExtendMs: eventManualHoldExtendHours() * HOUR, providerExtendMs: page ? Math.max(eventsProviderHoldExtendMinutes() * MINUTE, PAGE_TTL_MS + MINUTE) : eventsProviderHoldExtendMinutes() * MINUTE, maxHoursMs: eventManualHoldMaxHours() * HOUR });
         }
       });
     },

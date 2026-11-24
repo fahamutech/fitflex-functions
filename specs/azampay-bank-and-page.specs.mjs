@@ -10,7 +10,7 @@ import {
   azampaySettings, createAzamPayClient, parseCallback, AzamPayError, bankFor, toBankAccount, toOtp, pageUrlOf,
   AZAMPAY_BANKS, AZAMPAY_BANK_MAX_TZS,
 } from '../src/integrations/payments/azampay.mjs';
-import { createMobileMoneyService, requestIdOf } from '../src/services/mobile-money-service.mjs';
+import { createMobileMoneyService, requestIdOf, BANK_REJECTIONS_MAX, accountTail } from '../src/services/mobile-money-service.mjs';
 import { createAdminPaymentService } from '../src/services/admin-payment-service.mjs';
 import {
   pageReferenceFor, parsePageReference, mobileMoneyInFlight, PROMPT_TTL_MS, PAGE_TTL_MS,
@@ -32,6 +32,10 @@ test('bank inputs are checked for shape only: bank CRDB | NMB, an account of 5�
   for (const bad of ['', '1234', 'x'.repeat(31), '-12345', '12345;drop', '<script>', null, undefined, {}, ['12345678']]) assert.equal(toBankAccount(bad), null, String(bad));
   for (const ok of ['1234', '847291', 'A1B2C3', 123456]) assert.equal(toOtp(ok), String(ok), String(ok));
   for (const bad of ['', '123', '1'.repeat(13), '12 34', '12-34', '12.34', null, undefined, {}, ['1234']]) assert.equal(toOtp(bad), null, JSON.stringify(bad));
+});
+
+test('the account tail is the last four letters/digits only', () => {
+  assert.deepEqual([accountTail('0150-9988-7766'), accountTail('12 34'), accountTail('AB/12345'), accountTail(''), accountTail(null)], ['…7766', '…1234', '…2345', '…', '…']);
 });
 
 test('the page reference is exactly 30 lower-case letters/digits and parses back to one request and one attempt', () => {
@@ -63,8 +67,8 @@ test('return addresses come from the server\'s configuration only: app → this 
   });
   assert.deepEqual(pageReturnUrls('web', { id: 'pay_1a2b3c4d' }, env), {
     origin: 'https://portal.fitflex.test',
-    successUrl: 'https://portal.fitflex.test/m/payment-return?paymentRequestId=pay_1a2b3c4d&result=success',
-    failUrl: 'https://portal.fitflex.test/m/payment-return?paymentRequestId=pay_1a2b3c4d&result=failed',
+    successUrl: 'https://portal.fitflex.test/m/payment-return/?paymentRequestId=pay_1a2b3c4d&result=success',
+    failUrl: 'https://portal.fitflex.test/m/payment-return/?paymentRequestId=pay_1a2b3c4d&result=failed',
   });
   // not configured, or not https: the target does not exist
   assert.deepEqual(pageReturnTargets({}), []);
@@ -87,14 +91,31 @@ test('the app return page is static: two fixed sentences in English with a marke
   assert.equal(appReturnPage('<script>alert(1)</script>'), no, 'anything but "success" is the failed page');
 });
 
-test('pageUrlOf: only an absolute http(s) address is accepted (https only when live), quoted or plain', () => {
+test('pageUrlOf: only an https address on AzamPay\'s domain (or a listed host), with no user part, is handed to a client', () => {
   assert.equal(pageUrlOf('"https://payments.azampay.co.tz/?id=abc"'), 'https://payments.azampay.co.tz/?id=abc');
-  assert.equal(pageUrlOf(' https://payments.azampay.co.tz/x \n'), 'https://payments.azampay.co.tz/x');
-  assert.equal(pageUrlOf('{"data":"https://p.azampay.co.tz/y"}'), 'https://p.azampay.co.tz/y');
-  assert.equal(pageUrlOf('http://127.0.0.1:9/p', 'sandbox'), 'http://127.0.0.1:9/p');
-  for (const bad of ['http://p.azampay.co.tz/x', 'javascript:alert(1)', 'data:text/html,x', '/relative', 'payments.azampay.co.tz', '', '   ', 'https://a.test https://b.test', '{"success":false}', 'null', null, undefined]) {
-    assert.equal(pageUrlOf(bad, 'live'), null, String(bad));
+  assert.equal(pageUrlOf(' https://azampay.co.tz/x \n'), 'https://azampay.co.tz/x');
+  assert.equal(pageUrlOf('{"data":"https://p.sandbox.azampay.co.tz/y"}'), 'https://p.sandbox.azampay.co.tz/y');
+  assert.equal(pageUrlOf('https://PAYMENTS.AzamPay.co.tz/z'), 'https://payments.azampay.co.tz/z');
+  // another host only when it is listed (exact name), e.g. a local fake in a non-production sandbox
+  assert.equal(pageUrlOf('http://127.0.0.1:9/p', { httpsOnly: false, extraHosts: ['127.0.0.1'] }), 'http://127.0.0.1:9/p');
+  assert.equal(pageUrlOf('https://pay.partner.test/p', { extraHosts: [' Pay.Partner.Test '] }), 'https://pay.partner.test/p');
+  assert.equal(pageUrlOf('http://127.0.0.1:9/p', { httpsOnly: true, extraHosts: ['127.0.0.1'] }), null, 'https wherever it is required');
+  assert.equal(pageUrlOf('http://payments.azampay.co.tz/x'), null, 'plain http is refused by default');
+  assert.equal(pageUrlOf('http://payments.azampay.co.tz/x', { httpsOnly: false }), 'http://payments.azampay.co.tz/x');
+  for (const bad of [
+    'https://evil.test/pay', 'https://azampay.co.tz.evil.test/pay', 'https://evilazampay.co.tz/pay', 'https://azampay.co.tz@evil.test/pay',
+    'https://user:pass@payments.azampay.co.tz/pay', 'https://user@payments.azampay.co.tz/pay', 'https://sub.partner.test/p',
+    'javascript:alert(1)', 'data:text/html,x', '/relative', 'payments.azampay.co.tz', '', '   ', 'https://a.azampay.co.tz https://b.azampay.co.tz', '{"success":false}', 'null', null, undefined,
+  ]) {
+    assert.equal(pageUrlOf(bad, { extraHosts: ['partner.test'] }), null, String(bad));
   }
+});
+
+test('settings: a page address must be https in live and on any production server; extra hosts come from AZAMPAY_PAGE_HOSTS', () => {
+  const base = { AZAMPAY_APP_NAME: 'FitFlex', AZAMPAY_CLIENT_ID: 'cid', AZAMPAY_CLIENT_SECRET: 's' };
+  assert.deepEqual([azampaySettings(base).pageHttpsOnly, azampaySettings(base).pageHosts], [false, []]);
+  assert.equal(azampaySettings({ ...base, NODE_ENV: 'production' }).pageHttpsOnly, true, 'the sandbox on a production server too');
+  assert.deepEqual(azampaySettings({ ...base, AZAMPAY_PAGE_HOSTS: ' 127.0.0.1 , Pay.Partner.Test ,' }).pageHosts, ['127.0.0.1', 'pay.partner.test']);
 });
 
 // ── the client, against a fake AzamPay ─────────────────────────────────────
@@ -108,7 +129,7 @@ function fakeAzamPay({ bank, page, partners } = {}) {
     calls.push({ path: u.pathname, method: init.method, headers: init.headers, body });
     if (u.pathname === '/AppRegistration/GenerateToken') return reply(200, { data: { accessToken: 'tok', expire: iso(Date.now() + 3600_000) }, success: true });
     if (u.pathname === '/azampay/bank/checkout') return bank ? bank(body, reply) : reply(200, { transactionId: 'BANK_1', message: 'ok', success: true });
-    if (u.pathname === '/api/v1/Partner/PostCheckout') return page ? page(body, reply) : reply(200, '"https://payments.azampay.test/pay?id=abc"');
+    if (u.pathname === '/api/v1/Partner/PostCheckout') return page ? page(body, reply) : reply(200, '"https://payments.azampay.co.tz/pay?id=abc"');
     if (u.pathname === '/api/v1/Partner/GetPaymentPartners') return reply(200, partners ?? [{ logoUrl: 'https://x/l.png', partnerName: 'Azampesa', provider: 5, vendorName: 'FitFlex Africa', paymentVendorId: 'e9b57fab-1850-44d4-8499-71fd15c845a0', paymentPartnerId: '11111111-1111-1111-1111-111111111111', currency: 'TZS' }]);
     return reply(404, {});
   };
@@ -143,7 +164,7 @@ test('client: the checkout page needs the vendor; sends every documented field w
   assert.equal(c.pageConfigured(), true);
   const externalId = pageReferenceFor('pay_1a2b3c4d', T0);
   const args = { amountTzs: 60_000, externalId, language: 'sw', itemName: 'FitFlex', requestOrigin: 'https://api.fitflex.test', redirectSuccessUrl: 'https://api.fitflex.test/ok', redirectFailUrl: 'https://api.fitflex.test/no' };
-  assert.deepEqual(await c.createCheckoutPage(args), { url: 'https://payments.azampay.test/pay?id=abc' });
+  assert.deepEqual(await c.createCheckoutPage(args), { url: 'https://payments.azampay.co.tz/pay?id=abc' });
   const call = f.calls.find((x) => x.path === '/api/v1/Partner/PostCheckout');
   assert.deepEqual(call.body, {
     appName: 'FitFlex', clientId: 'cid', vendorId: VENDOR.AZAMPAY_VENDOR_ID, vendorName: 'FitFlex Africa', language: 'sw', currency: 'TZS',
@@ -152,8 +173,8 @@ test('client: the checkout page needs the vendor; sends every documented field w
   });
   assert.equal(call.body.externalId.length, 30);
   await assert.rejects(c.createCheckoutPage({ ...args, externalId: 'short' }), (e) => e.code === 'invalid_reference');
-  for (const answer of ['"javascript:alert(1)"', '', '{"success":false,"message":"no"}', '"/relative"']) {
-    const bad = createAzamPayClient({ settings: azampaySettings({ ...BASE, ...VENDOR }), fetchFn: fakeAzamPay({ page: (b, reply) => reply(200, answer) }).fetchFn });
+  for (const answer of ['"javascript:alert(1)"', '', '{"success":false,"message":"no"}', '"/relative"', '"https://evil.test/pay"', '"https://azampay.co.tz@evil.test/pay"', '"http://payments.azampay.co.tz/pay"']) {
+    const bad = createAzamPayClient({ settings: azampaySettings({ ...BASE, ...VENDOR, NODE_ENV: 'production' }), fetchFn: fakeAzamPay({ page: (b, reply) => reply(200, answer) }).fetchFn });
     await assert.rejects(bad.createCheckoutPage(args), (e) => e.code === 'rejected', answer);
   }
   // partners: where vendorId / vendorName come from (no logo address is passed on)
@@ -310,7 +331,7 @@ test('bank checkout, success: the request\'s own amount and our reference go to 
   assert.match(sent.reference, /^pay_1a2b3c4d\.[a-z0-9]+$/);
   assert.equal(mobileMoneyInFlight(w.req(), w.clock.t), true);
   const requested = w.audited('payment_mobile_money_requested')[0];
-  assert.deepEqual(requested.after, { transactionId: 'BANK_1', amountTzs: 60_000, method: 'bank', bank: 'NMB' });
+  assert.deepEqual(requested.after, { transactionId: 'BANK_1', amountTzs: 60_000, method: 'bank', bank: 'NMB', account: '…7766' }, 'the bank and the last four of the account, for a dispute — never the number or the OTP');
   // a refresh settles nothing; the callback does, once
   assert.equal((await w.service.refresh({ memberId: 'm1', paymentRequestId: ID })).state, 'in_progress');
   assert.equal((await w.service.handleCallback(cb({ utilityref: sent.reference }))).state, 'completed');
@@ -329,7 +350,7 @@ test('bank checkout, failure and refusal: a refused OTP frees the request at onc
   w.remote.fail = 'rejected';
   assert.deepEqual(await w.service.payByBank(BANK), { error: 'provider_rejected', status: 422 });
   assert.deepEqual([w.req().provider, w.req().reference], ['admin_approved', null]);
-  assert.deepEqual(w.audited('payment_mobile_money_failed_to_start')[0].after, { code: 'rejected', method: 'bank' });
+  assert.deepEqual(w.audited('payment_mobile_money_failed_to_start')[0].after, { code: 'rejected', method: 'bank', bankRejections: 1 });
   // a call that may have reached AzamPay keeps its claim (no second charge), then expires
   w.remote.fail = 'unreachable';
   assert.equal((await w.service.payByBank(BANK)).error, 'provider_unavailable');
@@ -409,7 +430,7 @@ test('checkout page: the address a client sends is never used — returnTo is a 
   // web: the member portal, with the request id (encoded) and nothing else
   const web = world();
   await web.service.payByPage({ ...PAGE, returnTo: 'web', language: 'SW' });
-  assert.deepEqual([web.remote.pages[0].redirectSuccessUrl, web.remote.pages[0].requestOrigin, web.remote.pages[0].language], ['https://portal.fitflex.test/m/payment-return?paymentRequestId=pay_1a2b3c4d&result=success', 'https://portal.fitflex.test', 'sw']);
+  assert.deepEqual([web.remote.pages[0].redirectSuccessUrl, web.remote.pages[0].requestOrigin, web.remote.pages[0].language], ['https://portal.fitflex.test/m/payment-return/?paymentRequestId=pay_1a2b3c4d&result=success', 'https://portal.fitflex.test', 'sw']);
 });
 
 test('checkout page, success: the page address is returned; coming back proves nothing; the callback for OUR reference approves it once and AzamPay\'s transaction is recorded', async () => {
@@ -438,14 +459,34 @@ test('checkout page, success: the page address is returned; coming back proves n
 });
 
 test('checkout page: failure, the wrong amount, one transaction for two requests, and a request that cannot have a page reference', async () => {
+  // A failed try on the page does NOT give the request back while the page is open: the payer can try again on it,
+  // and that success must find its attempt (not be charged and then held).
   const f = world();
-  await f.service.payByPage(PAGE);
+  const started = await f.service.payByPage(PAGE);
   const ref = f.remote.pages[0].externalId;
-  assert.equal((await f.service.handleCallback(cb({ utilityref: ref, transid: 'AZ_1', transactionstatus: 'failure' }))).state, 'failed');
-  assert.deepEqual([f.req().status, f.req().provider, f.req().reference, f.req().checkoutUrl, f.req().supersededReferences], ['pending', 'admin_approved', null, null, [ref]]);
-  // success after that failure: held, never approved
-  const late = await f.service.handleCallback(cb({ utilityref: ref, transid: 'AZ_1' }));
-  assert.deepEqual([late.state, late.reason, f.sub().status], ['held', 'no_open_attempt', 'payment_pending']);
+  const failed = await f.service.handleCallback(cb({ utilityref: ref, transid: 'AZ_TRY_1', transactionstatus: 'failure', message: 'Insufficient funds' }));
+  assert.equal(failed.state, 'in_progress');
+  assert.deepEqual([f.req().status, f.req().provider, f.req().reference, f.req().checkoutUrl, f.req().supersededReferences], ['pending', 'azampay', ref, started.checkoutUrl, undefined]);
+  assert.deepEqual(f.audited('payment_mobile_money_page_try_failed')[0].after, { why: 'Insufficient funds', transactionId: 'AZ_TRY_1' });
+  assert.equal(f.audited('payment_mobile_money_failed').length, 0, 'not released');
+  assert.equal((await f.service.payByPage(PAGE)).checkoutUrl, started.checkoutUrl, 'the same page is still handed back');
+  // the retry on the same page succeeds: settled, once
+  assert.equal((await f.service.handleCallback(cb({ utilityref: ref, transid: 'AZ_TRY_2' }))).state, 'completed');
+  assert.deepEqual([f.req().status, f.req().reference, f.sub().status, f.events], ['approved', 'AZ_TRY_2', 'active', ['sub_1']]);
+  // once the page's window has passed, a failure does give the request back; a success after that is held
+  const g = world();
+  await g.service.payByPage(PAGE);
+  const old = g.remote.pages[0].externalId;
+  g.clock.t += PAGE_TTL_MS + 1000;
+  assert.equal((await g.service.handleCallback(cb({ utilityref: old, transid: 'AZ_1', transactionstatus: 'failure' }))).state, 'failed');
+  assert.deepEqual([g.req().status, g.req().provider, g.req().reference, g.req().checkoutUrl, g.req().supersededReferences], ['pending', 'admin_approved', null, null, [old]]);
+  const late = await g.service.handleCallback(cb({ utilityref: old, transid: 'AZ_1' }));
+  assert.deepEqual([late.state, late.reason, g.sub().status], ['held', 'no_open_attempt', 'payment_pending']);
+  // a bank checkout or a phone prompt that fails is still released at once (nothing stays open for a retry)
+  const b = world();
+  await b.service.payByBank(BANK);
+  assert.equal((await b.service.handleCallback(cb({ utilityref: b.remote.bank[0].reference, transactionstatus: 'failure' }))).state, 'failed');
+  assert.equal(b.req().provider, 'admin_approved');
   for (const amount of ['1000', '120000', 'abc']) {
     const w = world();
     await w.service.payByPage(PAGE);
@@ -500,13 +541,75 @@ test('checkout page: it stays open for PAGE_TTL_MS (longer than a prompt); after
   assert.deepEqual([orphan.state, orphan.reason], ['held', 'no_open_attempt']);
 });
 
-test('a verified success whose reference matches no request is never dropped quietly: audited and raised for staff', async () => {
+test('a verified success whose reference matches no request is never dropped quietly: audited and raised for staff, keyed on the SIGNED fields so a replay cannot flood', async () => {
   const w = world();
-  const out = await w.service.handleCallback(cb({ utilityref: 'AZAMPAY-OWN-REF-0001', transid: 'AZ_X', amount: '60000' }));
+  const out = await w.service.handleCallback(cb({ utilityref: 'AZAMPAY-OWN-REF-0001', externalreference: 'PG-REF-1', transid: 'AZ_X', amount: '60000' }));
   assert.deepEqual(out, { status: 200, ok: true, ignored: 'unknown_reference' });
-  assert.deepEqual(w.unmatched, [{ reference: 'AZAMPAY-OWN-REF-0001', transactionId: 'AZ_X', amountTzs: 60_000 }]);
-  assert.deepEqual(w.audited('payment_mobile_money_unmatched')[0].after, { transactionId: 'AZ_X', amountTzs: 60_000 });
+  assert.deepEqual(w.unmatched, [{ reference: 'AZAMPAY-OWN-REF-0001', externalReference: 'PG-REF-1', transactionId: 'AZ_X', amountTzs: 60_000 }]);
+  assert.deepEqual(w.audited('payment_mobile_money_unmatched')[0].after, { externalReference: 'PG-REF-1', transactionId: 'AZ_X', amountTzs: 60_000 });
   // a failure for an unknown reference is nothing to report
   await w.service.handleCallback(cb({ utilityref: 'AZAMPAY-OWN-REF-0002', transid: 'AZ_Y', transactionstatus: 'failure' }));
   assert.equal(w.unmatched.length, 1);
+  // the hook says "already raised" (isNew false) for a repeat: counted there, no further audit row
+  const audit = [];
+  const raised = new Map();
+  const service = createMobileMoneyService({
+    paymentRequests: memStore(), subscriptions: memStore(), adminPaymentService: null, auditLog: { async insertAsync(e) { audit.push(e); } },
+    client: { environment: 'sandbox', confirmsByCallback: true, parseCallback }, enabled: () => true,
+    onUnmatched: async (d) => { const key = `${d.reference}:${d.externalReference}`; const isNew = !raised.has(key); raised.set(key, (raised.get(key) ?? 0) + 1); return { isNew }; },
+  });
+  // the same signed callback replayed 40 times with a different (unsigned) transid and amount each time
+  for (let i = 0; i < 40; i += 1) await service.handleCallback(cb({ utilityref: 'AZAMPAY-OWN-REF-0003', externalreference: 'PG-REF-3', transid: `FORGED_${i}`, amount: String(1000 + i) }));
+  assert.deepEqual([...raised.entries()], [['AZAMPAY-OWN-REF-0003:PG-REF-3', 40]], 'one exception, counted');
+  assert.equal(audit.filter((a) => a.action === 'payment_mobile_money_unmatched').length, 1, 'one audit row');
+});
+
+test('OTP guessing: after 5 bank refusals the bank method is closed for that request (409), whatever the phone or the wait; the other methods and other requests are not', async () => {
+  const w = world();
+  w.remote.fail = 'rejected';
+  for (let i = 0; i < BANK_REJECTIONS_MAX; i += 1) {
+    const out = await w.service.payByBank({ ...BANK, phone: `07540001${String(i).padStart(2, '0')}`, otp: String(100000 + i) });
+    assert.equal(out.error, 'provider_rejected', `refusal ${i + 1}`);
+    assert.equal(w.req().bankRejections, i + 1);
+    w.clock.t += 11 * 60_000;                                     // outside the per-member / per-phone window each time
+  }
+  w.remote.fail = null;                                           // even the right OTP is not sent any more
+  assert.deepEqual(await w.service.payByBank(BANK), { error: 'bank_attempts_exhausted', status: 409, max: BANK_REJECTIONS_MAX });
+  w.clock.t += 30 * DAY;
+  assert.equal((await w.service.payByBank(BANK)).error, 'bank_attempts_exhausted', 'waiting does not reopen it');
+  assert.equal(w.remote.bank.length, 0, 'nothing reached the bank after the cap');
+  // the request can still be paid another way, and another request by bank
+  assert.equal((await w.service.payByPage(PAGE)).status, 202);
+  assert.equal((await w.service.payByBank({ ...BANK, memberId: 'm2', paymentRequestId: 'pay_9f8e7d6c', phone: '0754000999' })).status, 202);
+  // only a refusal by the bank counts: an unreachable AzamPay or a bad shape does not
+  const u = world();
+  u.remote.fail = 'unreachable';
+  await u.service.payByBank(BANK);
+  await u.service.payByBank({ ...BANK, otp: '1' });
+  assert.equal(u.req().bankRejections, undefined);
+  assert.ok(!w.everythingKept().includes('100003'), 'the refused OTPs are kept nowhere either');
+});
+
+test('a decided request keeps no payment page: approved by the callback, rejected or approved by staff, or changed afterwards, checkoutUrl is cleared', async () => {
+  const viaCallback = world();
+  await viaCallback.service.payByPage(PAGE);
+  assert.ok(viaCallback.req().checkoutUrl);
+  await viaCallback.service.handleCallback(cb({ utilityref: viaCallback.remote.pages[0].externalId, transid: 'AZ_OK' }));
+  assert.deepEqual([viaCallback.req().status, viaCallback.req().checkoutUrl], ['approved', null]);
+  for (const decision of ['reject', 'approve']) {
+    const w = world();
+    await w.service.payByPage(PAGE);
+    const admin = createAdminPaymentService({ paymentRequests: w.paymentRequests, subscriptions: w.subscriptions, users: memStore(), auditLog: { async insertAsync() {} } });
+    const out = await admin.decide({ id: ID, decision, actorId: 'admin_1', reference: 'BANK_STATEMENT_1', amountTzs: 60_000 });
+    assert.equal(out.error, undefined, decision);
+    assert.deepEqual([w.req().status, w.req().checkoutUrl], [decision === 'approve' ? 'approved' : 'rejected', null], decision);
+    const after = await w.service.refresh({ memberId: 'm1', paymentRequestId: ID });
+    assert.equal(after.checkoutUrl, undefined, 'and it is never handed out for a decided request');
+    assert.equal((await w.service.payByPage(PAGE)).error, 'payment_not_pending');
+  }
+  // a request with no page is written exactly as before (no new key)
+  const plain = world();
+  const admin = createAdminPaymentService({ paymentRequests: plain.paymentRequests, subscriptions: plain.subscriptions, users: memStore(), auditLog: { async insertAsync() {} } });
+  await admin.decide({ id: ID, decision: 'reject', actorId: 'admin_1' });
+  assert.equal('checkoutUrl' in plain.req(), false);
 });

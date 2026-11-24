@@ -77,7 +77,9 @@ const isHttps = (u) => /^https:\/\/[^\s/]+/i.test(String(u));
  * AZAMPAY_SANDBOX_SETTLES on, would activate plans for sandbox money). Live needs the auth and
  * checkout hosts AzamPay gives after KYC approval, each https://; the disbursement host is for
  * payouts only (optional; https:// when given).
- *   'live_hosts_missing' | 'live_hosts_not_https' | null
+ * Live also needs the callback user and password (AZAMPAY_CALLBACK_USER / AZAMPAY_CALLBACK_PASSWORD): a second,
+ * shared secret on every callback besides the signature. The sandbox may run without them.
+ *   'live_hosts_missing' | 'live_hosts_not_https' | 'live_callback_auth_missing' | null
  */
 export function azampayConfigProblem(env = process.env) {
   if (first(env, ['AZAMPAY_ENV']).toLowerCase() !== 'live') return null;
@@ -86,6 +88,7 @@ export function azampayConfigProblem(env = process.env) {
   const disburse = first(env, ['AZAMPAY_DISBURSE_URL']);
   if (!auth || !checkout) return 'live_hosts_missing';
   if (!isHttps(auth) || !isHttps(checkout) || (disburse && !isHttps(disburse))) return 'live_hosts_not_https';
+  if (!first(env, ['AZAMPAY_CALLBACK_USER']) || !first(env, ['AZAMPAY_CALLBACK_PASSWORD'])) return 'live_callback_auth_missing';
   return null;
 }
 
@@ -133,6 +136,10 @@ export function azampaySettings(env = process.env) {
     // The checkout page: the vendor AzamPay knows this merchant as (GET …/GetPaymentPartners). The page stays closed without both.
     vendorId: first(env, ['AZAMPAY_VENDOR_ID']) || null,
     vendorName: first(env, ['AZAMPAY_VENDOR_NAME']) || null,
+    // Hosts a payment-page address may be on besides *.azampay.co.tz (AZAMPAY_PAGE_HOSTS, comma-separated host names).
+    pageHosts: first(env, ['AZAMPAY_PAGE_HOSTS']).split(',').map((h) => h.trim().toLowerCase()).filter(Boolean),
+    // https is required for a page address in live, and on any production server (sandbox included).
+    pageHttpsOnly: first(env, ['AZAMPAY_ENV']).toLowerCase() === 'live' || env.NODE_ENV === 'production',
     // Payouts: the RSA public key AzamPay gives for the disbursement checksum (PEM). Payouts stay off without it.
     disbursePublicKey: (env.AZAMPAY_DISBURSE_PUBLIC_KEY ? String(env.AZAMPAY_DISBURSE_PUBLIC_KEY).replace(/\\n/g, '\n').trim() : '') || null,
   };
@@ -280,12 +287,18 @@ export class AzamPayError extends Error {
   }
 }
 
+/** AzamPay's own domain: a payment-page address must be on it (or on a host named in AZAMPAY_PAGE_HOSTS). */
+export const AZAMPAY_PAGE_DOMAIN = 'azampay.co.tz';
+
 /**
  * The payment page's address from PostCheckout's answer: a bare string, JSON-quoted or not (some gateways wrap it
- * as { data | url }). Only an absolute http(s) URL is accepted — https only outside the sandbox — so nothing else
- * (a script address, a relative path) is ever handed to a client to open.
+ * as { data | url }). It is handed to a client to open, so it is accepted only when it is an absolute address
+ *   - on AzamPay's domain (azampay.co.tz or a sub-domain) or a host listed in `extraHosts` (exact host names),
+ *   - without a user or password part (https://azampay.co.tz@evil.test is refused),
+ *   - over https — plain http only when `httpsOnly` is false (a non-production sandbox against a local fake).
+ * Anything else is null and the attempt is refused.
  */
-export function pageUrlOf(text, environment = 'live') {
+export function pageUrlOf(text, { httpsOnly = true, extraHosts = [] } = {}) {
   let value = typeof text === 'string' ? text.trim() : '';
   try {
     const parsed = JSON.parse(value);
@@ -293,11 +306,14 @@ export function pageUrlOf(text, environment = 'live') {
     else if (parsed && typeof parsed === 'object') value = String(parsed.data ?? parsed.url ?? '').trim();
   } catch { /* plain text */ }
   if (!value || /\s/.test(value)) return null;
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:' || (url.protocol === 'http:' && environment !== 'live')) return url.toString();
-  } catch { /* not a URL */ }
-  return null;
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.username || url.password) return null;
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && !httpsOnly)) return null;
+  const host = url.hostname.toLowerCase();
+  const allowed = host === AZAMPAY_PAGE_DOMAIN || host.endsWith(`.${AZAMPAY_PAGE_DOMAIN}`)
+    || extraHosts.some((h) => typeof h === 'string' && h.trim().toLowerCase() === host);
+  return allowed ? url.toString() : null;
 }
 
 const KEY_TTL_MS = 24 * 60 * 60_000;
@@ -449,7 +465,7 @@ export function createAzamPayClient({ settings, fetchFn = globalThis.fetch, now 
           amount: String(Math.round(amountTzs)), cart: { items: [{ name: String(itemName || 'FitFlex').slice(0, 100) }] },
         },
       }));
-      const url = pageUrlOf(res, settings.environment);
+      const url = pageUrlOf(res, { httpsOnly: settings.pageHttpsOnly !== false, extraHosts: settings.pageHosts ?? [] });
       if (!url) throw new AzamPayError('AzamPay gave no payment page', { code: 'rejected', status: 422 });
       return { url };
     },

@@ -41,6 +41,8 @@ Object.assign(process.env, {
   AZAMPAY_APP_NAME: 'spec-app', AZAMPAY_CLIENT_ID: CLIENT_ID, AZAMPAY_CLIENT_SECRET: 'spec-secret',
   AZAMPAY_AUTH_URL: HOST, AZAMPAY_CHECKOUT_URL: HOST, AZAMPAY_DISBURSE_URL: HOST,
   AZAMPAY_VENDOR_ID: VENDOR_ID, AZAMPAY_VENDOR_NAME: 'FitFlex Africa',
+  // the local fake's host: a payment-page address anywhere else than *.azampay.co.tz must be listed
+  AZAMPAY_PAGE_HOSTS: '127.0.0.1',
 });
 delete process.env.AZAMPAY_ENV;
 delete process.env.NODE_ENV;
@@ -63,7 +65,7 @@ const made = { subs: [], pays: [], users: [] };
 afterEach(() => { for (const k of FLAGS) delete process.env[k]; bankAnswer = null; });
 after(async () => {
   await db('OpsException').where('dedupeKey', 'like', 'azampay_%').whereIn('entityId', made.pays).del().catch(() => {});
-  await db('OpsException').where('dedupeKey', 'like', 'azampay_unmatched:SPECX_%').del().catch(() => {});
+  await db('OpsException').where('dedupeKey', 'like', 'azampay_unmatched:SPECX-%').del().catch(() => {});
   if (made.pays.length) { await db('AuditLog').whereIn('target', made.pays).del(); await db('PaymentRequest').whereIn('id', made.pays).del(); }
   await db('AuditLog').where('target', 'like', 'SPECX-%').del();
   if (made.subs.length) await db('Subscription').whereIn('id', made.subs).del();
@@ -189,7 +191,7 @@ test('bank checkout through the routes: someone else\'s request is 404; the OTP 
   }
   assert.deepEqual(Object.keys(await rowOf(p.payId)).filter(k => /otp/i.test(k)), [], 'there is no column for it');
   const requested = await db('AuditLog').where({ target: p.payId, action: 'payment_mobile_money_requested' }).first();
-  assert.deepEqual([requested.actor, requested.after.method, requested.after.bank], ['azampay', 'bank', 'CRDB']);
+  assert.deepEqual([requested.actor, requested.after.method, requested.after.bank, requested.after.account], ['azampay', 'bank', 'CRDB', '…2211'], 'the last four of the account only');
   // refresh (both paths) reports, settles nothing
   for (const route of [refreshPayment, refreshMobileMoneyPayment]) assert.equal((await call(route, p.memberId, { id: p.payId })).body.state, 'in_progress');
   assert.equal((await call(refreshPayment, other, { id: p.payId })).statusCode, 404);
@@ -220,8 +222,8 @@ test('checkout page through the routes: the client cannot influence the redirect
   assert.deepEqual(sent, {
     appName: 'spec-app', clientId: CLIENT_ID, vendorId: VENDOR_ID, vendorName: 'FitFlex Africa', language: 'sw', currency: 'TZS', externalId: sent.externalId,
     requestOrigin: 'https://portal.fitflex.test',
-    redirectFailURL: `https://portal.fitflex.test/m/payment-return?paymentRequestId=${p.payId}&result=failed`,
-    redirectSuccessURL: `https://portal.fitflex.test/m/payment-return?paymentRequestId=${p.payId}&result=success`,
+    redirectFailURL: `https://portal.fitflex.test/m/payment-return/?paymentRequestId=${p.payId}&result=failed`,
+    redirectSuccessURL: `https://portal.fitflex.test/m/payment-return/?paymentRequestId=${p.payId}&result=success`,
     amount: '80000', cart: { items: [{ name: 'FitFlex' }] },
   });
   assert.ok(!JSON.stringify(sent).includes('evil'));
@@ -252,14 +254,55 @@ test('checkout page through the routes: the client cannot influence the redirect
   assert.deepEqual([done.body.state, done.body.checkoutUrl], ['completed', undefined]);
 });
 
-test('a verified success for a reference we cannot place (should AzamPay not echo ours for a bank or page payment) raises an ops exception instead of vanishing', async () => {
+test('a verified success for a reference we cannot place (should AzamPay not echo ours for a bank or page payment) raises ONE ops exception, keyed on the signed fields: replays with other transaction ids are counted on it', async () => {
   on('AZAMPAY_BANK_CHECKOUT', 'AZAMPAY_CHECKOUT_PAGE');
+  const utilityref = `SPECX-${hex(12)}`; const externalreference = `SPECXEXT-${hex(8)}`;
   const txn = `SPECX_${hex(10)}`;
-  const out = await callback({ utilityref: `SPECX-${hex(12)}`, transid: txn, amount: '80000' });
+  const out = await callback({ utilityref, externalreference, transid: txn, amount: '80000' });
   assert.deepEqual([out.statusCode, out.body], [200, { ok: true }]);
-  const ex = await db('OpsException').where({ dedupeKey: `azampay_unmatched:${txn}` }).first();
+  const key = `azampay_unmatched:${utilityref}:${externalreference}`;
+  const ex = await db('OpsException').where({ dedupeKey: key }).first();
   assert.ok(ex, 'staff are told');
-  assert.deepEqual([ex.type, ex.severity, ex.status], ['payment_conflict', 'high', 'open']);
+  assert.deepEqual([ex.type, ex.severity, ex.status, ex.occurrences], ['payment_conflict', 'high', 'open', 1]);
   const detail = typeof ex.detail === 'string' ? JSON.parse(ex.detail) : ex.detail;
-  assert.deepEqual([detail.transactionId, detail.amountTzs], [txn, 80000]);
+  assert.deepEqual([detail.reference, detail.externalReference, detail.transactionId, detail.amountTzs], [utilityref, externalreference, txn, 80000]);
+  // the same signed callback replayed with a different transid (transid is not signed) each time
+  for (let i = 0; i < 6; i += 1) assert.equal((await callback({ utilityref, externalreference, transid: `SPECX_FORGED_${i}_${hex(6)}`, amount: String(80000 + i) })).statusCode, 200);
+  const all = await db('OpsException').where('dedupeKey', 'like', `azampay_unmatched:${utilityref}%`);
+  assert.deepEqual([all.length, all[0].occurrences], [1, 7], 'one exception, repeats counted');
+  assert.equal((await db('OpsException').where('dedupeKey', 'like', 'azampay_unmatched:SPECX_FORGED_%')).length, 0);
+  assert.equal((await db('AuditLog').where({ action: 'payment_mobile_money_unmatched', target: utilityref })).length, 1, 'one audit row');
+});
+
+test('a decided request keeps no payment page in the database (staff reject through the real service)', async () => {
+  on('AZAMPAY_CHECKOUT_PAGE');
+  const p = await pending();
+  const out = await call(payByCheckoutPage, p.memberId, { id: p.payId, body: {} });
+  assert.equal(out.statusCode, 202, JSON.stringify(out.body));
+  assert.ok((await rowOf(p.payId)).checkoutUrl);
+  const { adminPaymentService } = await import('../src/bootstrap/services.mjs');
+  assert.equal((await adminPaymentService.decide({ id: p.payId, decision: 'reject', actorId: 'spec_admin' })).error, undefined);
+  const row = await rowOf(p.payId);
+  assert.deepEqual([row.status, row.checkoutUrl], ['rejected', null]);
+  assert.equal((await call(refreshPayment, p.memberId, { id: p.payId })).body.checkoutUrl, undefined);
+});
+
+test('OTP guessing through the routes: the fifth refusal closes the bank method for that request (409 bank_attempts_exhausted); the count is on the row, the OTPs are not', async () => {
+  on('AZAMPAY_BANK_CHECKOUT');
+  const p = await pending();
+  bankAnswer = { code: 200, body: { success: false, message: 'Invalid OTP' } };
+  // the per-member / per-phone window is in memory: the earlier refusals are set on the row as the service writes them
+  const first = await call(payByBank, p.memberId, { id: p.payId, body: { bank: 'NMB', accountNumber: ACCOUNT, phone: phone(), otp: '555001' } });
+  assert.deepEqual([first.statusCode, first.body.error, (await rowOf(p.payId)).bankRejections], [422, 'provider_rejected', 1]);
+  await db('PaymentRequest').where({ id: p.payId }).update({ bankRejections: 4 });
+  const fifth = await call(payByBank, p.memberId, { id: p.payId, body: { bank: 'NMB', accountNumber: ACCOUNT, phone: phone(), otp: '555005' } });
+  assert.deepEqual([fifth.statusCode, fifth.body.error, (await rowOf(p.payId)).bankRejections], [422, 'provider_rejected', 5]);
+  bankAnswer = null;
+  const sent = seen.bank.length;
+  const closed = await call(payByBank, p.memberId, { id: p.payId, body: { bank: 'NMB', accountNumber: ACCOUNT, phone: phone(), otp: '555006' } });
+  assert.deepEqual([closed.statusCode, closed.body], [409, { error: 'bank_attempts_exhausted', max: 5 }]);
+  assert.equal(seen.bank.length, sent, 'nothing reaches the bank any more');
+  const everything = await kept(p.payId);
+  for (const otp of ['555001', '555005', '555006']) assert.ok(!everything.includes(otp));
+  assert.match(everything, /"bankRejections":5/);
 });

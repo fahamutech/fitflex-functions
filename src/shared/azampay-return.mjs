@@ -7,7 +7,7 @@
 //   app   <PUBLIC_API_URL>/payments/azampay/return?result=success|failed
 //         a small page of this server ("go back to the app"); the mobile app opened AzamPay's page in the
 //         external browser and refreshes the payment when the member comes back.
-//   web   <PORTAL_PUBLIC_URL>/m/payment-return?paymentRequestId=<id>&result=success|failed
+//   web   <PORTAL_PUBLIC_URL>/m/payment-return/?paymentRequestId=<id>&result=success|failed
 //         a page of the member web portal, which refreshes the payment.
 //
 // Arriving at either address proves NOTHING about the payment: it is settled only by AzamPay's signed callback.
@@ -16,7 +16,8 @@ import { publicBaseUrl } from './vendor-documents.mjs';
 export const RETURN_TARGETS = Object.freeze(['app', 'web']);
 export const RETURN_RESULTS = Object.freeze(['success', 'failed']);
 export const APP_RETURN_PATH = '/payments/azampay/return';
-export const WEB_RETURN_PATH = '/m/payment-return';
+// Trailing slash: the portal is a static export (/m/payment-return/index.html); a redirect to add it may drop the query.
+export const WEB_RETURN_PATH = '/m/payment-return/';
 
 /** The base of a target (https; http only under NODE_ENV=test), or null while it is not configured. */
 const baseOf = (target, env) => (target === 'app' ? publicBaseUrl(env.PUBLIC_API_URL, { nodeEnv: env.NODE_ENV })

@@ -895,7 +895,12 @@ const azampayConfig = azampaySettings();
 // AZAMPAY_ENV=live without usable live hosts: closed, never quietly the sandbox (azampaySettings answers null).
 const azampayProblem = azampayConfigProblem();
 if (azampayProblem) {
-  console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${azampayProblem === 'live_hosts_not_https' ? 'a live host is not https://' : 'AZAMPAY_AUTH_URL / AZAMPAY_CHECKOUT_URL are not both set'}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
+  const why = {
+    live_hosts_missing: 'AZAMPAY_AUTH_URL / AZAMPAY_CHECKOUT_URL are not both set',
+    live_hosts_not_https: 'a live host is not https://',
+    live_callback_auth_missing: 'AZAMPAY_CALLBACK_USER / AZAMPAY_CALLBACK_PASSWORD are not both set',
+  }[azampayProblem] ?? 'the live configuration is incomplete';
+  console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${why}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
 }
 export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
 if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
@@ -919,7 +924,7 @@ export const mobileMoneyService = createMobileMoneyService({
   eventOrders: {
     enabled: () => eventsPaymentsAzampayOn() && Boolean(eventTicketKeyRing()),
     beforePrompt: request => eventsPaymentsService.hooks.beforePrompt(request),
-    afterPrompt: (request, transactionId) => eventsPaymentsService.hooks.afterPrompt(request, transactionId),
+    afterPrompt: (request, transactionId, opts) => eventsPaymentsService.hooks.afterPrompt(request, transactionId, opts),
     onHeld: (request, reason, detail) => eventsPaymentsService.hooks.onHeld(request, reason, detail),
     onFailed: (request, remark) => eventsPaymentsService.hooks.onFailed(request, remark),
   },
@@ -929,13 +934,18 @@ export const mobileMoneyService = createMobileMoneyService({
   // Where the page sends the payer afterwards: this server's own return page, or the member web portal. Built from
   // PUBLIC_API_URL / PORTAL_PUBLIC_URL only (src/shared/azampay-return.mjs); a client names the target, never an address.
   pageReturn: { targets: () => pageReturnTargets(), urls: (target, request) => pageReturnUrls(target, request) },
-  // A verified success callback that names no payment request we know: staff are told, once per transaction.
-  onUnmatched: detail => opsService.raise({
-    type: 'payment_conflict', severity: 'high',
-    title: 'AzamPay confirmed a payment that matches no payment request — check it by hand',
-    dedupeKey: `azampay_unmatched:${detail.transactionId ?? detail.reference}`,
-    entityType: 'payment_request', entityId: null, detail,
-  }),
+  // A verified success callback that names no payment request we know: staff are told. The exception is keyed on the
+  // fields AzamPay SIGNS (utilityref + externalreference), never on transid (unsigned): a signed callback replayed
+  // with other transaction ids is counted on the one exception (occurrences), it cannot open new ones.
+  onUnmatched: async (detail) => {
+    const { isNew } = await opsService.raise({
+      type: 'payment_conflict', severity: 'high',
+      title: 'AzamPay confirmed a payment that matches no payment request — check it by hand',
+      dedupeKey: `azampay_unmatched:${String(detail.reference).slice(0, 140)}:${String(detail.externalReference ?? '').slice(0, 140)}`,
+      entityType: 'payment_request', entityId: null, detail,
+    });
+    return { isNew };
+  },
   // Money AzamPay confirmed that was not approved (passes, plans, trainer products, shop orders): staff are told
   // the way they are for events — an ops exception, one per request and transaction. Event orders raise their own.
   onHeld: (request, reason, detail) => opsService.raise({
