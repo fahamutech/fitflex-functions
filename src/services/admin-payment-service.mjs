@@ -361,7 +361,9 @@ export function createAdminPaymentService({
       // An upgrade's note names the plan it upgrades: it stays as it is.
       note: upgradeOf(request) ? request.note : (note || null),
       decidedAt: now,
-      decidedBy: actorId
+      decidedBy: actorId,
+      // A decided request has no payment page any more (AzamPay's hosted page; set by the mobile-money service).
+      ...(request.checkoutUrl ? { checkoutUrl: null } : {})
     };
     const updated = await writeDecision(request, patch, guard, { actorId, automated, reasonCode, memberNote, memberNoteSw, amountTzs, providerPayload });
     // Another decision got there first (two staff members, or a double click).
@@ -438,7 +440,8 @@ export function createAdminPaymentService({
       reference: finalRef,
       note: upgradeOf(request) ? request.note : (note ?? request.note ?? null),
       decidedAt: nextStatus === 'pending' ? null : (request.decidedAt || now),
-      decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId)
+      decidedBy: nextStatus === 'pending' ? null : (keepDecider ? request.decidedBy : actorId),
+      ...(request.checkoutUrl && nextStatus !== 'pending' ? { checkoutUrl: null } : {})
     };
     // Flag on: only while the verification read still stands (a stale read cannot overwrite a verified payment).
     const updated = await writeDecision(request, patch, twoAdmins ? { verifiedBy: request.verifiedBy ?? null } : {}, { actorId, amountTzs, reasonCode, memberNote, memberNoteSw });
@@ -553,6 +556,7 @@ export function createAdminPaymentService({
       decidedAt: nextStatus === 'pending' ? null : at,
       decidedBy: nextStatus === 'pending' ? null : actorId,
       ...CHANGE_CLEARED,
+      ...(request.checkoutUrl && nextStatus !== 'pending' ? { checkoutUrl: null } : {}),
     };
     // Back to pending: it has to be verified again before anyone approves it.
     if (nextStatus === 'pending') Object.assign(patch, { verifiedBy: null, verifiedAt: null });

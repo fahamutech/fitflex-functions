@@ -470,6 +470,10 @@ test('POST /me/shop-orders reads the Idempotency-Key header, keeps its 201 + ord
   assert.equal(second.headers['Idempotent-Replay'], 'true');
   assert.equal(first.headers['Idempotent-Replay'], undefined);
   assert.equal(await stockOf(productId), 4);
+  // the order names the payment request it waits on, so the app can pay it without reading /me/payments (replay too)
+  const pending = await db('PaymentRequest').where({ orderId: first.body.id, status: 'pending' }).first('id');
+  assert.ok(pending?.id);
+  assert.deepEqual([first.body.paymentRequestId, second.body.paymentRequestId], [pending.id, pending.id]);
   const bad = await call({ 'idempotency-key': 'x' });
   assert.equal(bad.code, 400);
 });
