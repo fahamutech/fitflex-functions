@@ -325,7 +325,7 @@ test('bank checkout, success: the request\'s own amount and our reference go to 
   const w = world();
   const out = await w.service.payByBank({ ...BANK, bank: 'nmb', amountTzs: 1, amount: 1 });
   assert.deepEqual([out.status, out.state, out.method], [202, 'in_progress', 'bank']);
-  assert.deepEqual(out.paymentRequest, { id: ID, status: 'pending', amountTzs: 60_000, provider: 'azampay', reference: 'BANK_1' });
+  assert.deepEqual(out.paymentRequest, { id: ID, status: 'pending', amountTzs: 60_000, provider: 'azampay', reference: 'BANK_1', productType: 'FITFLEX_PASS' });
   const sent = w.remote.bank[0];
   assert.deepEqual([sent.bank, sent.accountNumber, sent.msisdn, sent.otp, sent.amountTzs], ['NMB', ACCOUNT, '255712345678', OTP, 60_000]);
   assert.match(sent.reference, /^pay_1a2b3c4d\.[a-z0-9]+$/);
