@@ -335,9 +335,13 @@ export function createAuthService({
         : uidMatches.length === 0;
       if (claimsEmailOnlyRow) return { error: 'email_verification_required', status: 409 };
     }
-    const identityMatches = emailVerified
+    // Rows this uid already owns come first: the table scan has no ORDER BY, and every `find` and `[0]` below must
+    // reach the uid's own row before an unclaimed email-only row of the same type (which it would claim, colliding
+    // with the row it already owns on (firebaseUid, userType)).
+    const identityMatches = (emailVerified
       ? candidates.filter(u => u.firebaseUid === fb.uid || trustedEmailOnly.has(u.id))
-      : uidMatches;
+      : uidMatches
+    ).sort((a, b) => Number(b.firebaseUid === fb.uid) - Number(a.firebaseUid === fb.uid));
     // Rows holding this email that this sign-in ignores: a new or updated row
     // must not collide with them on the (email, userType) index.
     const ignoredEmailRows = candidates.filter(u => u.firebaseUid !== fb.uid
