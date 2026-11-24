@@ -87,7 +87,7 @@ Rules:
 
 ## Check-ins complete gym days (slice B3)
 
-No new endpoint. A recorded visit marks the gym day of the member's active programme done, and the plan answers (`GET /training/plans/current` and the plan list) show it as `completedBy: { source: 'checkin', checkinId, completedAt }`.
+No new endpoint. A recorded visit marks the gym day of the member's active programme done, and the plan answers (`GET /me/training-plans/current` and the plan list) show it as `completedBy: { source: 'checkin', checkinId, completedAt }`.
 
 - **Which visits:** gym QR, staff scan, web check-in and sponsor-funded visits (`onCheckin` in `checkInService`), and visits the owner records by hand (PD-6; a new `onManualVisit` hook in `memberManagement.checkInMember`).
 - **Which days:** only a `gym` day of an active programme plan, on the visit's East Africa business day. A visit on a home or rest day, or outside the programme, is not counted (PD-5).
