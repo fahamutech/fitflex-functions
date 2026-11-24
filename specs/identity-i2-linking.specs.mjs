@@ -156,6 +156,25 @@ test('Case F: a second live persona of the same type is a conflict, not a link',
   });
 });
 
+// Sign-in takes the row that already belongs to this Firebase uid, whatever order Postgres scans the User table in.
+// Updating the uid's row moves its newest tuple after the staff-made row, which used to make the sign-in pick the
+// staff-made row and write the uid onto it (User_firebaseUid_userType_key violation).
+test('Case F: the uid-owned row is chosen even when the staff-made row is scanned first', async () => {
+  await withFlags(['V2_LINKING'], async () => {
+    const uid = uniq('fb');
+    const email = `${uniq('forder')}@example.com`;
+    const member = await makeUser({ firebaseUid: uid, email: `${uniq('own')}@example.com` });
+    const staffMadeMember = await makeUser({ email, userType: 'member' });
+    // Two updates leave the uid's row after the staff-made row in the table.
+    for (let i = 0; i < 2; i += 1) await db('User').where({ id: member.id }).update({ displayName: `touched ${i}` });
+    const out = await signIn({ uid, email, email_verified: true }, { role: 'member' });
+    assert.equal(out.statusCode, 200);
+    assert.equal(out.body.user.id, member.id, 'signs in as the row that owns the uid');
+    assert.equal((await db('User').where({ id: staffMadeMember.id }).first()).firebaseUid, null, 'the staff-made row is not claimed');
+    assert.ok(await openConflict('duplicate_persona', `${member.personId}:member`));
+  });
+});
+
 test('Case G: an email already verified on another Person is a conflict', async () => {
   await withFlags(['V2_LINKING'], async () => {
     const email = `${uniq('g')}@example.com`;

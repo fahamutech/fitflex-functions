@@ -101,6 +101,11 @@ export function createRefundService({
     return covered >= owed;
   }
 
+  // REFUND_END_ACCESS_DEFAULT on: endAccess is true, false or left out. Anything else ("false", 0, null-ish strings) is
+  // refused rather than read as "not sent", which would apply the server default the sender meant to override.
+  // Flag off: unchanged (only an explicit true is read).
+  const badEndAccess = (body) => endAccessDefault() && body.endAccess != null && typeof body.endAccess !== 'boolean';
+
   // A refund a staff member raises is not approved by the raise when either flag is on: someone else decides it.
   const adminRaiseWaits = () => secondApprover() || splitScopes();
 
@@ -192,6 +197,7 @@ export function createRefundService({
     // cancel_instead below; the amount cap, the two-admin rule and one-refund-per-payment all still apply.
     // S4: money that arrived for an event order whose places are not possible (kind event_order, unfulfilled payment only).
     if (body.eventPaymentId && raiseForEventPayment) return raiseForEventPayment({ body, actorId, secondApprover: adminRaiseWaits() });
+    if (badEndAccess(body)) return fail('invalid_end_access', 400);
     const request = body.paymentRequestId ? await paymentRequests.findByIdAsync(body.paymentRequestId) : null;
     if (!request) return fail('payment_not_found', 404);
     if (!held && !request.subscriptionId) return fail('cancel_instead', 409);
@@ -218,6 +224,7 @@ export function createRefundService({
   /** Admin: approve or reject a requested refund. Rejecting needs a note the member sees. */
   async function decide({ id, body = {}, actorId }) {
     if (!['approve', 'reject'].includes(body.decision)) return fail('invalid_decision', 400, { allowed: ['approve', 'reject'] });
+    if (badEndAccess(body)) return fail('invalid_end_access', 400);
     const prior = await refunds.findByIdAsync(id);
     if (!prior) return fail('refund_not_found', 404);
     if (prior.status !== 'requested') return fail('already_decided', 409, { refundStatus: prior.status });
