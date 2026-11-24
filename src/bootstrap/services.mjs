@@ -149,6 +149,7 @@ import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
 import { programmesCatalogueOn } from '../shared/feature-flags.mjs';
 import { createProgrammeService } from '../services/training/programme-service.mjs';
 import { createProgrammeCheckinService } from '../services/training/programme-checkin-service.mjs';
+import { createKpiTargetService } from '../services/kpi-target-service.mjs';
 import { exerciseById } from '../shared/exercise-library.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
@@ -1841,3 +1842,6 @@ opsService.register({
   },
 });
 void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;
+
+// FR-K01: KPI targets admins view and change in the portal (audited).
+export const kpiTargetService = createKpiTargetService({ db, auditLog });
