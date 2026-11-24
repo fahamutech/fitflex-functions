@@ -626,12 +626,24 @@ export function createMobileMoneyService({
    * and its single use are checked. Answers 200-class so AzamPay stops retrying,
    * except for a malformed body.
    */
-  async function handleCallback(payload) {
+  async function handleCallback(payload, { signed = true } = {}) {
     if (!client || typeof client.parseCallback !== 'function') return fail('feature_disabled', 404);
     const parsed = client.parseCallback(payload);
     const requestId = requestIdOf(parsed.referenceId);
     if (!requestId || !parsed.transactionId) return fail('invalid_payload', 400);
     const request = await paymentRequests.findByIdAsync(requestId);
+    const ids = parsed.transactionIds || [];
+    // A callback whose signature could not be checked (sandbox only; the route decides) is believed only for
+    // the attempt that is open right now: our reference, the transaction id AzamPay gave us for that prompt,
+    // and (in settle) the exact amount. Anything else changes nothing.
+    if (!signed) {
+      const matches = Boolean(request) && request.status === 'pending' && inFlight(request)
+        && !isPlaceholder(request.reference) && ids.includes(request.reference);
+      if (!matches) {
+        if (request) await audit('payment_mobile_money_unsigned_refused', request.id, null, { transactionIds: ids, recorded: request.reference ?? null, status: request.status });
+        return fail('unsigned_unmatched', 403);
+      }
+    }
     if (!request) {
       // Money AzamPay says it took, for a reference we cannot place: never dropped quietly. (Which field carries our
       // reference for bank and page payments is not documented; if it is not `utilityref`, this is where it shows.)
@@ -651,7 +663,6 @@ export function createMobileMoneyService({
     }
     // AzamPay names a transaction more than one way: use the one the request recorded, if any.
     // Failing that, one it gave up earlier (a late answer for an old prompt); else the callback's own.
-    const ids = parsed.transactionIds || [];
     const given = supersededOf(request);
     // A payment page has no transaction id until it is paid: its attempt is OUR reference (30 characters), which
     // AzamPay signs back as utilityref. It settles on that; AzamPay's own id is what gets recorded (settleAs).

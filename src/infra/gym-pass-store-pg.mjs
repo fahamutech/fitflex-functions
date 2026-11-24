@@ -384,14 +384,43 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
     return (await db('Checkin').where({ beneficiaryId }).whereNot('status', 'voided').orderBy('timestamp', 'desc').limit(limit)
       .select('id', 'gymId', 'timestamp', 'method', 'status', 'businessDate', 'passPurchaseId', 'beneficiaryId')).map(plain);
   }
-  /** Every sale of a gym with the money (approved payment only) and the people, for the aggregates. */
-  async function summaryRows(gymId) {
-    const purchases = (await db('GymPassPurchase as p').leftJoin('PaymentRequest as r', 'r.id', 'p.paymentRequestId')
+  /**
+   * Every sale of a gym with the money (approved payment only) and the people, for the aggregates.
+   * `from` / `to` (Dates, from inclusive, to exclusive) narrow SALES to those whose payment was approved in the range
+   * (PaymentRequest.decidedAt, the date Finance reports on); an unapproved purchase has no approval date and is kept.
+   */
+  async function summaryRows(gymId, { from = null, to = null } = {}) {
+    const q = db('GymPassPurchase as p').leftJoin('PaymentRequest as r', 'r.id', 'p.paymentRequestId')
       .where('p.gymId', gymId)
-      .select('p.id', 'p.status', 'p.expiresAt', 'p.snapshot', 'r.status as paymentStatus', 'r.amountTzs as amountTzs')).map(plain);
+      .select('p.id', 'p.planId', 'p.status', 'p.expiresAt', 'p.snapshot', 'r.status as paymentStatus', 'r.amountTzs as amountTzs', 'r.decidedAt as approvedAt');
+    if (from) q.where(w => w.where('r.decidedAt', '>=', from).orWhereNot('r.status', 'approved').orWhereNull('r.id'));
+    if (to) q.where(w => w.where('r.decidedAt', '<', to).orWhereNot('r.status', 'approved').orWhereNull('r.id'));
+    const purchases = (await q).map(plain);
     const people = await db('GymPassBeneficiary as b').join('GymPassPurchase as p', 'p.id', 'b.purchaseId')
       .where('p.gymId', gymId).groupBy('b.purchaseId', 'b.status').select('b.purchaseId', 'b.status').count({ n: '*' });
     return { purchases, people: people.map(r => ({ purchaseId: r.purchaseId, status: r.status, n: Number(r.n) })) };
+  }
+  /**
+   * Utilisation inputs for a gym, in two queries: the people whose account is attached (status active) and, in ONE
+   * groupBy, the non-voided visits per person. Never a query per sale or per person.
+   */
+  async function utilisationRows(gymId) {
+    const active = await db('GymPassBeneficiary as b').join('GymPassPurchase as p', 'p.id', 'b.purchaseId')
+      .where('p.gymId', gymId).where('b.status', 'active').select('b.id', 'b.purchaseId');
+    const visits = await db('Checkin as c').join('GymPassPurchase as p', 'p.id', 'c.passPurchaseId')
+      .where('p.gymId', gymId).whereNot('c.status', 'voided')
+      .groupBy('c.passPurchaseId', 'c.beneficiaryId').select('c.passPurchaseId as purchaseId', 'c.beneficiaryId').count({ visits: '*' });
+    return {
+      active: active.map(r => ({ id: r.id, purchaseId: r.purchaseId })),
+      visits: visits.map(r => ({ purchaseId: r.purchaseId, beneficiaryId: r.beneficiaryId, visits: Number(r.visits) })),
+    };
+  }
+  /** Pass name and category (from the sale's snapshot) for these purchase ids, in ONE query: Map id → { name, category }. */
+  async function passLabels(purchaseIds) {
+    const ids = [...new Set((purchaseIds || []).filter(Boolean))];
+    if (!ids.length) return new Map();
+    const rows = await db('GymPassPurchase').whereIn('id', ids).select('id', 'snapshot');
+    return new Map(rows.map(r => [r.id, { name: r.snapshot?.name ?? null, category: r.snapshot?.category ?? null }]));
   }
 
   // ── limits, blocks, send counts ────────────────────────────────────────────
@@ -439,7 +468,7 @@ export function createPgGymPassStore({ db, now = () => new Date() }) {
     createPurchase, cancelOpen, pendingContactsOf, activate, reverse,
     addBeneficiary, changeStatus,
     setInvite, findByToken, recordSent, claimNotice, recordNotified, pendingForContacts, claim,
-    expireDue, purchasesForGym, purchaseWithPayment, purchasesForPurchaser, beneficiariesOfMany, membershipsOfUser, attendanceCounts, attendanceOf, summaryRows,
+    expireDue, purchasesForGym, purchaseWithPayment, purchasesForPurchaser, beneficiariesOfMany, membershipsOfUser, attendanceCounts, attendanceOf, summaryRows, utilisationRows, passLabels,
     newId,
   };
 }

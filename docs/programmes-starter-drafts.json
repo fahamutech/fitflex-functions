@@ -1,0 +1,1306 @@
+{
+  "note": "DRAFT starter programmes for a partner trainer to review (owner decision PD-10, 20 Nov 2026). Not live. Swahili values are [SW] placeholders pending native review. Each entry is a POST /admin/programmes body; nothing loads this file automatically.",
+  "programmes": [
+    {
+      "title": "7-day home starter",
+      "summary": "Four short no-equipment sessions at home, one gym visit and rest days, to build the habit.",
+      "goal": "stay_fit",
+      "level": "beginner",
+      "environment": "home",
+      "equipment": [
+        "none"
+      ],
+      "lengthDays": 7,
+      "days": [
+        {
+          "type": "home",
+          "workout": {
+            "name": "Full body A",
+            "activityType": "functional",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Bodyweight Squat",
+                "libraryId": "ex_bodyweight_squat",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Incline Push-up",
+                "libraryId": "ex_incline_push_up",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Glute Bridge",
+                "libraryId": "ex_glute_bridge",
+                "muscleGroup": "glutes",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 8,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Full body B",
+            "activityType": "functional",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Walking Lunge",
+                "libraryId": "ex_walking_lunge",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Push-up",
+                "libraryId": "ex_push_up",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 8,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Superman",
+                "libraryId": "ex_superman",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Dead Bug",
+                "libraryId": "ex_dead_bug",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Calf Raise",
+                "libraryId": "ex_calf_raise",
+                "muscleGroup": "calves",
+                "sets": 3,
+                "reps": 15,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "gym"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Full body A",
+            "activityType": "functional",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Bodyweight Squat",
+                "libraryId": "ex_bodyweight_squat",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Incline Push-up",
+                "libraryId": "ex_incline_push_up",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Glute Bridge",
+                "libraryId": "ex_glute_bridge",
+                "muscleGroup": "glutes",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 8,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        }
+      ],
+      "i18n": {
+        "sw": {
+          "title": "[SW] 7-day home starter",
+          "summary": "[SW] Four short no-equipment sessions at home, one gym visit and rest days, to build the habit."
+        }
+      }
+    },
+    {
+      "title": "14-day strength foundations",
+      "summary": "Two weeks mixing gym strength days with short home sessions. Gym days have a suggested workout; any check-in counts.",
+      "goal": "build_muscle",
+      "level": "beginner",
+      "environment": "gym",
+      "equipment": [
+        "machines",
+        "dumbbells"
+      ],
+      "lengthDays": 14,
+      "days": [
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: legs and core",
+            "activityType": "strength",
+            "estimatedDuration": 40,
+            "exercises": [
+              {
+                "exerciseName": "Leg Press",
+                "libraryId": "ex_leg_press",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Goblet Squat",
+                "libraryId": "ex_goblet_squat",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dumbbell Romanian Deadlift",
+                "libraryId": "ex_dumbbell_rdl",
+                "muscleGroup": "hamstrings",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Step-up",
+                "libraryId": "ex_step_up",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Side Plank",
+                "libraryId": "ex_side_plank",
+                "muscleGroup": "obliques",
+                "sets": 2,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Full body A",
+            "activityType": "functional",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Bodyweight Squat",
+                "libraryId": "ex_bodyweight_squat",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Incline Push-up",
+                "libraryId": "ex_incline_push_up",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Glute Bridge",
+                "libraryId": "ex_glute_bridge",
+                "muscleGroup": "glutes",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 8,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: chest, back and shoulders",
+            "activityType": "strength",
+            "estimatedDuration": 40,
+            "exercises": [
+              {
+                "exerciseName": "Machine Chest Press",
+                "libraryId": "ex_machine_chest_press",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Lat Pulldown",
+                "libraryId": "ex_lat_pulldown",
+                "muscleGroup": "back",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Seated Cable Row",
+                "libraryId": "ex_seated_cable_row",
+                "muscleGroup": "back",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dumbbell Shoulder Press",
+                "libraryId": "ex_dumbbell_shoulder_press",
+                "muscleGroup": "shoulders",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dead Bug",
+                "libraryId": "ex_dead_bug",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: legs and core",
+            "activityType": "strength",
+            "estimatedDuration": 40,
+            "exercises": [
+              {
+                "exerciseName": "Leg Press",
+                "libraryId": "ex_leg_press",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Goblet Squat",
+                "libraryId": "ex_goblet_squat",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dumbbell Romanian Deadlift",
+                "libraryId": "ex_dumbbell_rdl",
+                "muscleGroup": "hamstrings",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Step-up",
+                "libraryId": "ex_step_up",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Side Plank",
+                "libraryId": "ex_side_plank",
+                "muscleGroup": "obliques",
+                "sets": 2,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Full body B",
+            "activityType": "functional",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Walking Lunge",
+                "libraryId": "ex_walking_lunge",
+                "muscleGroup": "quadriceps",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Push-up",
+                "libraryId": "ex_push_up",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 8,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Superman",
+                "libraryId": "ex_superman",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Dead Bug",
+                "libraryId": "ex_dead_bug",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Calf Raise",
+                "libraryId": "ex_calf_raise",
+                "muscleGroup": "calves",
+                "sets": 3,
+                "reps": 15,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: chest, back and shoulders",
+            "activityType": "strength",
+            "estimatedDuration": 40,
+            "exercises": [
+              {
+                "exerciseName": "Machine Chest Press",
+                "libraryId": "ex_machine_chest_press",
+                "muscleGroup": "chest",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Lat Pulldown",
+                "libraryId": "ex_lat_pulldown",
+                "muscleGroup": "back",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Seated Cable Row",
+                "libraryId": "ex_seated_cable_row",
+                "muscleGroup": "back",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dumbbell Shoulder Press",
+                "libraryId": "ex_dumbbell_shoulder_press",
+                "muscleGroup": "shoulders",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": true
+              },
+              {
+                "exerciseName": "Dead Bug",
+                "libraryId": "ex_dead_bug",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "reps": 12,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "rest"
+        }
+      ],
+      "i18n": {
+        "sw": {
+          "title": "[SW] 14-day strength foundations",
+          "summary": "[SW] Two weeks mixing gym strength days with short home sessions. Gym days have a suggested workout; any check-in counts."
+        }
+      }
+    },
+    {
+      "title": "21-day cardio builder",
+      "summary": "Three weeks of walking, home cardio and gym days that build up gently.",
+      "goal": "improve_endurance",
+      "level": "beginner",
+      "environment": "any",
+      "equipment": [
+        "none"
+      ],
+      "lengthDays": 21,
+      "days": [
+        {
+          "type": "home",
+          "workout": {
+            "name": "Brisk walk",
+            "activityType": "other",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 900,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Cardio at home",
+            "activityType": "hiit",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Jumping Jacks",
+                "libraryId": "ex_jumping_jacks",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 45,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "High Knees",
+                "libraryId": "ex_high_knees",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Shadow Boxing",
+                "libraryId": "ex_shadow_boxing",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: bike and core",
+            "activityType": "hiit",
+            "estimatedDuration": 30,
+            "exercises": [
+              {
+                "exerciseName": "Stationary Bike",
+                "libraryId": "ex_stationary_bike",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 600,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Brisk walk",
+            "activityType": "other",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 900,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Walk-jog intervals",
+            "activityType": "other",
+            "estimatedDuration": 25,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 300,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Jog and Walk Intervals",
+                "libraryId": "ex_jog_intervals",
+                "muscleGroup": "cardio",
+                "sets": 6,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Cardio at home",
+            "activityType": "hiit",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Jumping Jacks",
+                "libraryId": "ex_jumping_jacks",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 45,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "High Knees",
+                "libraryId": "ex_high_knees",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Shadow Boxing",
+                "libraryId": "ex_shadow_boxing",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: bike and core",
+            "activityType": "hiit",
+            "estimatedDuration": 30,
+            "exercises": [
+              {
+                "exerciseName": "Stationary Bike",
+                "libraryId": "ex_stationary_bike",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 600,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Walk-jog intervals",
+            "activityType": "other",
+            "estimatedDuration": 25,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 300,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Jog and Walk Intervals",
+                "libraryId": "ex_jog_intervals",
+                "muscleGroup": "cardio",
+                "sets": 6,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Walk-jog intervals",
+            "activityType": "other",
+            "estimatedDuration": 25,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 300,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Jog and Walk Intervals",
+                "libraryId": "ex_jog_intervals",
+                "muscleGroup": "cardio",
+                "sets": 6,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Cardio at home",
+            "activityType": "hiit",
+            "estimatedDuration": 20,
+            "exercises": [
+              {
+                "exerciseName": "Jumping Jacks",
+                "libraryId": "ex_jumping_jacks",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 45,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "High Knees",
+                "libraryId": "ex_high_knees",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Shadow Boxing",
+                "libraryId": "ex_shadow_boxing",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 20,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "gym",
+          "workout": {
+            "name": "Gym: bike and core",
+            "activityType": "hiit",
+            "estimatedDuration": 30,
+            "exercises": [
+              {
+                "exerciseName": "Stationary Bike",
+                "libraryId": "ex_stationary_bike",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 600,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Mountain Climber",
+                "libraryId": "ex_mountain_climber",
+                "muscleGroup": "cardio",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Plank",
+                "libraryId": "ex_plank",
+                "muscleGroup": "abs",
+                "sets": 3,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Bird Dog",
+                "libraryId": "ex_bird_dog",
+                "muscleGroup": "lower_back",
+                "sets": 3,
+                "reps": 10,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "rest"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Walk-jog intervals",
+            "activityType": "other",
+            "estimatedDuration": 25,
+            "exercises": [
+              {
+                "exerciseName": "Brisk Walk",
+                "libraryId": "ex_brisk_walk",
+                "muscleGroup": "cardio",
+                "sets": 1,
+                "duration": 300,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Jog and Walk Intervals",
+                "libraryId": "ex_jog_intervals",
+                "muscleGroup": "cardio",
+                "sets": 6,
+                "duration": 60,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "gym"
+        },
+        {
+          "type": "home",
+          "workout": {
+            "name": "Stretch and breathe",
+            "activityType": "mobility",
+            "estimatedDuration": 15,
+            "exercises": [
+              {
+                "exerciseName": "Cat-Cow",
+                "libraryId": "ex_cat_cow",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "reps": 10,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Hip Flexor Stretch",
+                "libraryId": "ex_hip_flexor_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Seated Hamstring Stretch",
+                "libraryId": "ex_hamstring_stretch",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 30,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Child's Pose",
+                "libraryId": "ex_childs_pose",
+                "muscleGroup": "mobility",
+                "sets": 2,
+                "duration": 40,
+                "tracksWeight": false
+              },
+              {
+                "exerciseName": "Slow Breathing",
+                "libraryId": "ex_deep_breathing",
+                "muscleGroup": "mobility",
+                "sets": 1,
+                "duration": 120,
+                "tracksWeight": false
+              }
+            ]
+          }
+        }
+      ],
+      "i18n": {
+        "sw": {
+          "title": "[SW] 21-day cardio builder",
+          "summary": "[SW] Three weeks of walking, home cardio and gym days that build up gently."
+        }
+      }
+    }
+  ]
+}

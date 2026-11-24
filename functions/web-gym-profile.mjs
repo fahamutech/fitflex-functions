@@ -2,15 +2,17 @@
 // Dormant: 404 not_found unless WEB_GYM_PROFILE is set. Every miss is the same 404 { error: 'not_found' }.
 // The body (`q`, a signed gym QR) is never logged.
 import '../src/bootstrap/init.mjs';
-import { gymService, settingsService, trainerService, moderationGate, partnerGate } from '../src/bootstrap/services.mjs';
+import { gymService, settingsService, trainerService, moderationGate, partnerGate, gymPassService } from '../src/bootstrap/services.mjs';
 import { createWebGymProfileService } from '../src/services/web-gym-profile-service.mjs';
-import { webGymProfileOn } from '../src/shared/feature-flags.mjs';
+import { webGymProfileOn, gymCustomPassesOn } from '../src/shared/feature-flags.mjs';
 import { createVendorLimiter, limitOrNull } from '../src/shared/vendor-rate-limit.mjs';
 import { clientAddress } from '../src/shared/client-address.mjs';
 
 const created = new Date().toISOString();
 
-const webGymProfile = createWebGymProfileService({ gymService, settingsService, trainerService, moderationGate, partnerGate });
+// Custom gym passes on the page: the gym's ACTIVE plans, and only while GYM_CUSTOM_PASSES is on (off → none).
+const gymPasses = async (gymId) => (gymCustomPassesOn() ? ((await gymPassService.publicPlans(gymId)).plans ?? []) : []);
+const webGymProfile = createWebGymProfileService({ gymService, settingsService, trainerService, moderationGate, partnerGate, gymPasses });
 
 // Per client address, in memory per server: 30 a minute.
 export const WEB_GYM_PROFILE_RATE_PER_MINUTE = 30;
@@ -36,7 +38,7 @@ const secretConfigured = () => {
 
 export const resolveWebGym = {
   created, method: 'post', path: '/public/gyms/resolve',
-  description: 'Public, no auth (WEB_GYM_PROFILE on and QR_HMAC_SECRET set, else 404 not_found): { q, lang?: en|sw } where q is the signed gym QR payload (fitflex:gym:<gymId>:<sig>) or an https URL carrying it as ?q= → { lang, gym { publicRef, name, description, tier, venueType, verified, rating, reviewCount, photos[≤5, data:image or our storage URL, ~1.5 MB total], thumbnail, area, address, lat, lng, directions, facilities[], equipment[], amenities[], services[], operatingHours, classes[{ name, schedule, priceTzs, location }], trainers[≤6]{ name, photoUrl, specialties, rating } }, membership { currency, gymPlans[{ plan, label, period, priceTzs, days }], passTiers[{ key, label, monthlyPriceTzs, visits, visitsLabel }] } }. A bad signature, unknown, inactive, unlisted, held-back or KYC-hidden gym, or malformed q is the same 404 { error: "not_found" }. Over 30 requests a minute from one address → 429 rate_limited { retryAfterSeconds }.',
+  description: 'Public, no auth (WEB_GYM_PROFILE on and QR_HMAC_SECRET set, else 404 not_found): { q, lang?: en|sw } where q is the signed gym QR payload (fitflex:gym:<gymId>:<sig>) or an https URL carrying it as ?q= → { lang, gym { publicRef, name, description, tier, venueType, verified, rating, reviewCount, photos[≤5, data:image or our storage URL, ~1.5 MB total], thumbnail, area, address, lat, lng, directions, facilities[], equipment[], amenities[], services[], operatingHours, classes[{ name, schedule, priceTzs, location }], trainers[≤6]{ name, photoUrl, specialties, rating } }, membership { currency, gymPlans[{ plan, label, period, priceTzs, days }], passTiers[{ key, label, monthlyPriceTzs, visits, visitsLabel }], gymPasses[{ planId, name, description, category: individual|couples|group, durationValue, durationUnit: days|weeks|months, beneficiaryLimit, priceTzs, terms, termsVersion }] (the ACTIVE custom passes of the gym; [] unless GYM_CUSTOM_PASSES is on; planId is what POST /me/gym-pass-purchases takes) } }. A bad signature, unknown, inactive, unlisted, held-back or KYC-hidden gym, or malformed q is the same 404 { error: "not_found" }. Over 30 requests a minute from one address → 429 rate_limited { retryAfterSeconds }.',
   requestSample: { q: 'fitflex:gym:gym_001:<sig>', lang: 'sw' },
   onRequest: async (req, res) => {
     if (!webGymProfileOn() || !secretConfigured()) return notFound(res);

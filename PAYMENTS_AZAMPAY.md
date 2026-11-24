@@ -20,6 +20,7 @@ Built dormant. Nothing is offered until the flags below are set on the server.
 | `AZAMPAY_ENV` | `sandbox` (default) or exactly `live`. Live needs `AZAMPAY_AUTH_URL` and `AZAMPAY_CHECKOUT_URL` (AzamPay gives the production hosts after KYC approval), each `https://`. **If `live` is set and they are missing or not https, AzamPay is CLOSED** — no client, nothing offered, callbacks 403 — and the server logs `[azampay] MISCONFIGURED (live_hosts_missing \| live_hosts_not_https)` at boot. It never falls back to the sandbox. `AZAMPAY_DISBURSE_URL` is for payouts only (optional; `https://` when given; payouts stay closed without it). Host overrides are ignored in sandbox when `NODE_ENV=production`. |
 | `AZAMPAY_PAYMENTS` | `on` to offer "Pay now". Off: `POST /me/payments/:id/mobile-money` is 404 `feature_disabled` and payment requests are settled by staff only. |
 | `AZAMPAY_SANDBOX_SETTLES` | `on` to allow paying against the **sandbox**. A sandbox payment still activates a real plan, so set it only on a test server. |
+| `AZAMPAY_SANDBOX_UNSIGNED_CALLBACKS` | Sandbox only, never live (owner decision 2026-11-17). AzamPay's sandbox `GET /azampay/v1/public-key` answered 404, so no sandbox callback signature can be checked and every callback was refused (403). `on`: such a callback is acted on only when it names the attempt open right now — our reference (`utilityref`) and the transaction id AzamPay returned when the prompt went out (one of `transid` / `reference` / `externalreference`) — and the amount is exact; anything else answers 403 and changes nothing (audit `payment_mobile_money_unsigned_refused`). A `clientId` that is not ours is still refused. |
 | `AZAMPAY_TRAINER_PRODUCTS` | `on` to make trainer sessions / trainer gym passes payable (needs `AZAMPAY_PAYMENTS`). |
 | `EVENTS_PAYMENTS_AZAMPAY` | `on` to make a member's event order payable (needs `AZAMPAY_PAYMENTS`, `EVENTS_MODULE`, `EVENTS_REGISTRATION`, a ticket secret and the approver gate). Replaces `EVENTS_PAYMENTS_TUNZAA`. |
 | `AZAMPAY_BANK_CHECKOUT` | `on` to offer **bank checkout** (CRDB, NMB; needs `AZAMPAY_PAYMENTS`). Off: `POST /me/payments/:id/bank` is 404. |
@@ -348,3 +349,12 @@ plan's `expiresAt` with its full length. It applies to every way a plan is paid 
 - `scheduled` counts as holding its tier (tier-holders).
 - Known gaps: admin member views that list only `active` plans do not show a scheduled renewal until it starts;
   refunding a scheduled plan follows the existing refund workflow (not specially handled).
+
+## Logs (2026-11-17)
+Every step prints one line with a fixed prefix, never a secret, token, signature, password or full phone number:
+- `[azampay] config` at start-up: which AzamPay settings are present (yes/no), the environment, the switches.
+- `[azampay] callback_refused` with `reason`: `client_not_configured`, `not_an_object`, `client_id_mismatch`, `callback_auth_mismatch`, `client_id_missing`, `unsigned`, `public_key_unavailable`, `signature_invalid`. Also the field names that arrived, `utilityref`, status, operator, amount, the transaction ids and the last 3 digits of the phone.
+- `[azampay] callback` for an accepted one: `signed`, the outcome (`completed`, `held` + reason, `failed`, `unsigned_unmatched`, …).
+- `[azampay] call_failed` for a failed call to AzamPay (`token`, `public_key`, `mno_checkout`): HTTP status, code, AzamPay's message.
+- `[azampay] mno_checkout`: our reference, wallet, amount, AzamPay's `success`, `transactionId` and message.
+- `[azampay] pay` / `[azampay] refresh`: payment request, user, role, wallet, HTTP status and outcome.

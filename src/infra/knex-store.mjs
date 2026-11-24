@@ -86,6 +86,8 @@ const TABLE_MAP = {
   workout_plans:     { table: 'WorkoutPlan' },
   training_plans:    { table: 'TrainingPlan' },
   training_exercises: { table: 'TrainingExercise' },
+  programmes:        { table: 'Programme' },
+  programme_day_completions: { table: 'ProgrammeDayCompletion' },
   gym_member_sharing: { table: 'GymMemberSharing' },
   challenges:        { table: 'Challenge' },
   challenge_participants: { table: 'ChallengeParticipant' },
@@ -725,8 +727,10 @@ const ALLOWED_FIELDS = {
   username_releases: new Set(['id','handleLower','userId','reason','releasedAt']),
   goals:            new Set(['id','userId','type','period','target','startDate','endDate','source','trainerId','challengeId','status','createdByType','createdById','title','completions','createdAt','updatedAt']),
   workouts:         new Set(['id','userId','trainerId','gymId','templateId','source','name','description','activityType','scheduledDate','estimatedDuration','status','exercises','notes','startedAt','completedAt','activityId','trainingPlanId','feedback','createdAt','updatedAt']),
-  training_plans:   new Set(['id','userId','name','goal','targetAreas','experience','environment','equipment','style','durationWeeks','daysPerWeek','sessionMinutes','status','createdByType','createdById','trainerId','engine','startDate','endDate','weeks','note','createdAt','updatedAt']),
-  training_exercises: new Set(['id','name','description','category','targetAreas','secondaryAreas','movementPattern','difficulty','equipment','environment','suitableGoals','defaultSets','defaultReps','defaultDuration','restSeconds','tracksWeight','instructions','alternatives','active','i18n','updatedBy','createdAt','updatedAt']),
+  training_plans:   new Set(['id','userId','name','goal','targetAreas','experience','environment','equipment','style','durationWeeks','daysPerWeek','sessionMinutes','status','createdByType','createdById','trainerId','engine','startDate','endDate','weeks','note','programmeId','lengthDays','createdAt','updatedAt']),
+  training_exercises: new Set(['id','name','description','category','targetAreas','secondaryAreas','movementPattern','difficulty','equipment','environment','suitableGoals','defaultSets','defaultReps','defaultDuration','restSeconds','tracksWeight','instructions','alternatives','active','i18n','clipUrl','stillUrl','updatedBy','createdAt','updatedAt']),
+  programmes:       new Set(['id','title','summary','i18n','goal','level','environment','equipment','lengthDays','days','status','versionOf','createdBy','updatedBy','publishedAt','retiredAt','createdAt','updatedAt']),
+  programme_day_completions: new Set(['id','planId','userId','date','source','checkinId','completedAt','reversedAt','reversedReason','createdAt']),
   trainer_member_relationships: new Set(['id','trainerId','memberId','status','permissions','requestedAt','connectedAt','endedAt','endedBy','createdAt','updatedAt']),
   workout_plans:    new Set(['id','trainerId','name','description','activityType','estimatedDuration','exercises','createdAt','updatedAt']),
   gym_member_sharing: new Set(['id','gymId','memberId','permissions','createdAt','updatedAt']),
@@ -815,6 +819,7 @@ const JSON_FIELDS = {
   workout_plans: ['exercises'],
   training_plans: ['targetAreas', 'equipment', 'weeks'],
   training_exercises: ['targetAreas', 'secondaryAreas', 'equipment', 'environment', 'suitableGoals', 'instructions', 'alternatives', 'i18n'],
+  programmes: ['i18n', 'equipment', 'days'],
   gym_member_sharing: ['permissions'],
   challenges: ['rewards', 'eligibility', 'rewardItems'],
   challenge_rewards: ['history'],
@@ -874,7 +879,7 @@ export function prepareForKnex(name, data, isUpdate = false) {
     'performedAt', 'acceptedAt', 'effectiveFrom', 'revokedAt',
     'lastMessageAt', 'trainerReadAt', 'memberReadAt', 'termsAcceptedAt', 'statusChangedAt', 'voidedAt',
     'cycleStart', 'cycleEnd', 'lockedAt', 'approvedAt', 'enrolledAt', 'removedAt',
-    'heldAt', 'rejectedAt', 'payableAt', 'publishedAt', 'rightsConfirmedAt', 'noFacesConfirmedAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt', 'changeRequestedAt', 'promptedAt'];
+    'heldAt', 'rejectedAt', 'payableAt', 'publishedAt', 'rightsConfirmedAt', 'noFacesConfirmedAt', 'startsAt', 'endsAt', 'pausedAt', 'activatedAt', 'submittedAt', 'changeRequestedAt', 'promptedAt', 'retiredAt', 'reversedAt'];
   for (const f of DATE_FIELDS) {
     if (CALENDAR_DATE_COLLECTIONS.has(name) && CALENDAR_DATE_FIELDS.has(f)) continue;
     if (cleaned[f] !== undefined && cleaned[f] !== null && !(cleaned[f] instanceof Date)) {

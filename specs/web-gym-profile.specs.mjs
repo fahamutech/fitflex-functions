@@ -10,6 +10,7 @@ import { resolveWebGym, resetWebGymProfileLimits, WEB_GYM_PROFILE_RATE_PER_MINUT
 import { getGym } from '../functions/gyms.mjs';
 import { memberScanGymQr } from '../functions/checkins.mjs';
 import { extractQrPayload, publicRefFor } from '../src/services/web-gym-profile-service.mjs';
+import { gymPassStore } from '../src/bootstrap/services.mjs';
 
 assert.match(String(process.env.DATABASE_URL_CI || ''), /fitflex_ci/, 'specs run against the CI database only');
 
@@ -81,6 +82,7 @@ after(async () => {
   for (const [k, v] of [['QR_HMAC_SECRET', secretBefore], ['PUBLIC_API_URL', apiBefore]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
   await db('ModerationState').whereIn('entityId', created.gyms).del();
   if (flagBefore === undefined) delete process.env.WEB_GYM_PROFILE; else process.env.WEB_GYM_PROFILE = flagBefore;
+  if (created.gyms.length) await db('GymPassPlan').whereIn('gymId', created.gyms).del();
   for (const id of created.gyms) await gyms.removeAsync(g => g.id === id);
   if (created.gyms.length) await db('Gym').whereIn('id', created.gyms).del();
   await db.destroy();
@@ -116,6 +118,38 @@ test('a valid QR returns the whitelisted profile, from the same sources as the a
   assert.ok(Array.isArray(membership.passTiers));
   for (const t of membership.passTiers) assert.ok(Number.isInteger(t.monthlyPriceTzs) && t.monthlyPriceTzs > 0, 'tiers are the Settings tiers that are sellable');
   assert.ok(!JSON.stringify(out.body).includes(id), 'the internal gym id is nowhere in the response');
+});
+
+test('custom gym passes: active plans only, only while GYM_CUSTOM_PASSES is on, never the gym id', async () => {
+  const id = await makeGym();
+  const row = (extra) => ({
+    id: uid('gpp'), gymId: id, name: 'Couples 3 months', description: 'For two', category: 'couples', durationValue: 3, durationUnit: 'months',
+    beneficiaryLimit: 2, priceTzs: 240000, status: 'active', startPolicy: 'immediate', terms: 'No refunds.', termsVersion: 2,
+    createdBy: 'spec', createdAt: now(), updatedAt: now(), ...extra,
+  });
+  const live = await gymPassStore.insertPlan(row({}));
+  await gymPassStore.insertPlan(row({ name: 'Hidden', status: 'inactive' }));
+  const flag = process.env.GYM_CUSTOM_PASSES;
+  try {
+    delete process.env.GYM_CUSTOM_PASSES;
+    const off = await resolve({ q: issueGymQr(id) });
+    assert.equal(off.statusCode, 200);
+    assert.deepEqual(off.body.membership.gymPasses, [], 'flag off: no custom passes, the rest of the page is unchanged');
+    assert.equal(off.body.membership.gymPlans.length, 3);
+
+    process.env.GYM_CUSTOM_PASSES = '1';
+    const on = await resolve({ q: issueGymQr(id) });
+    assert.equal(on.statusCode, 200);
+    assert.deepEqual(on.body.membership.gymPasses, [{
+      planId: live.id, name: 'Couples 3 months', description: 'For two', category: 'couples', durationValue: 3, durationUnit: 'months',
+      beneficiaryLimit: 2, priceTzs: 240000, terms: 'No refunds.', termsVersion: 2,
+    }]);
+    assert.ok(!JSON.stringify(on.body).includes(id), 'the internal gym id is nowhere in the response');
+    const keys = keysDeep(on.body);
+    for (const k of FORBIDDEN_KEYS) assert.ok(!keys.has(k), `response must not carry ${k}`);
+  } finally {
+    if (flag === undefined) delete process.env.GYM_CUSTOM_PASSES; else process.env.GYM_CUSTOM_PASSES = flag;
+  }
 });
 
 test('no owner, KYC, bank, commission, member keys or internal ids', async () => {
@@ -209,6 +243,54 @@ test('photos: valid data:image kept, our /storage path made absolute, other remo
   delete process.env.PUBLIC_API_URL;
   const noBase = await resolve({ q: issueGymQr(id) });
   assert.ok(!noBase.body.gym.photos.some(p => p.includes('/storage/')), 'no public API base: storage paths are dropped');
+});
+
+test('photos: our storage URL with spaces or symbols in the file name is shown; anything not ours is still dropped', async () => {
+  const ours = 'https://api.example.test/storage/bafkreicid1';
+  const kept = [
+    `${ours}/_%20(31).webp`,
+    `${ours}/Gym%20Old%20School.webp`,
+    `${ours}/%23gym.webp`,
+    `${ours}/Best%20Functional%20Fitness%20%26%20%40more%E2%80%99s!.webp`,
+  ];
+  const dropped = [
+    'https://tracker.example/storage/bafkreicid1/_%20(31).webp',          // another host
+    'http://api.example.test/storage/bafkreicid1/a%20b.webp',             // not https
+    `${ours}/a%20b.webp?x=1`,                                             // query
+    `${ours}/a%20b.webp#x`,                                               // fragment
+    'https://user@api.example.test/storage/bafkreicid1/a%20b.webp',       // credentials
+    `${ours}/a%2Fb.webp`,                                                 // escaped slash
+    `${ours}/a%5Cb.webp`,                                                 // escaped backslash
+    `${ours}/%2E%2E`,                                                     // escaped dot segment
+    `${ours}/a%00b.webp`,                                                 // control character
+    `${ours}/a%ZZb.webp`,                                                 // broken escape
+    `${ours}/a%FFb.webp`,                                                 // not UTF-8
+    `${ours}/sub/a%20b.webp`,                                             // extra segment
+    'https://api.example.test/other/bafkreicid1/a%20b.webp',              // not /storage
+    'https://api.example.test/storage/a%20cid/b.webp',                    // escape in the cid
+    '//tracker.example/storage/bafkreicid1/a%20b.webp',                   // protocol-relative
+  ];
+  const id = await makeGym({ images: [...dropped.slice(0, 8), kept[0], kept[1], ...dropped.slice(8), kept[2], kept[3]], thumbnails: [kept[0]] });
+  const out = await resolve({ q: issueGymQr(id) });
+  assert.equal(out.statusCode, 200);
+  assert.deepEqual(out.body.gym.photos, kept);
+  assert.equal(out.body.gym.thumbnail, kept[0]);
+
+  // The root-relative form is made absolute on PUBLIC_API_URL.
+  const rel = await makeGym({ images: ['/storage/bafkreicid1/a%20b%20(2).webp'], thumbnails: [] });
+  const relOut = await resolve({ q: issueGymQr(rel) });
+  assert.deepEqual(relOut.body.gym.photos, [`${ours}/a%20b%20(2).webp`]);
+
+  // A base with a path: only addresses under that path are ours.
+  process.env.PUBLIC_API_URL = 'https://api.example.test/v1/';
+  const based = await makeGym({ images: ['https://api.example.test/v1/storage/bafkreicid1/a%20b.webp', kept[0]], thumbnails: [] });
+  const basedOut = await resolve({ q: issueGymQr(based) });
+  assert.deepEqual(basedOut.body.gym.photos, ['https://api.example.test/v1/storage/bafkreicid1/a%20b.webp']);
+
+  delete process.env.PUBLIC_API_URL;
+  const noBase = await resolve({ q: issueGymQr(id) });
+  assert.deepEqual(noBase.body.gym.photos, [], 'no public API base: nothing from storage is shown');
+  assert.equal(noBase.body.gym.thumbnail, null);
 });
 
 test('held back gyms answer the same 404: unlisted, suspended in moderation, suspended status', async () => {

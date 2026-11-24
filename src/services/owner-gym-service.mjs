@@ -1,6 +1,7 @@
 // Owner/operator gym management service — self-registration, gym CRUD scoped
 // to the owner's own gym(s), invoices/earnings, trainer↔gym linking.
 import { publicCheckin } from '../shared/checkin-status.mjs';
+import { gymCustomPassesOn } from '../shared/feature-flags.mjs';
 import { randomUUID } from 'node:crypto';
 import { OPEN_GATE } from './partner-gate.mjs';
 import { hashPassword } from '../auth/password-credentials.mjs';
@@ -33,7 +34,7 @@ const OWNER_TRAINER_FIELDS = Object.freeze([
 ]);
 
 // onGymRemoved(gymId): follow-ups once an owner deleted a gym (partner media purge, functions#277 review M2).
-export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE, gymPayoutOwner = null, onGymRemoved = async () => {} }) {
+export function createOwnerGymService({ gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate = OPEN_GATE, gymPayoutOwner = null, passLabels = null, onGymRemoved = async () => {} }) {
   // Set by FitFlex, never by the owner: the verified badge, commission,
   // homepage placement, status and payout/tax details. Payout details for new
   // partners come from their verified KYC payout account.
@@ -167,7 +168,13 @@ export function createOwnerGymService({ gyms, users, trainers, invoices, auditLo
     const ids = ownerGymIdsOf(owner);
     if (!ids.includes(gymId)) return { error: 'not_your_gym', status: 403 };
     const allGymCheckins = await checkins.filterAsync(c => c.gymId === gymId);
-    return { list: allGymCheckins.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)).slice(0, 100).map(c => ({ ...publicCheckin(c) })) };
+    const list = allGymCheckins.sort((a, b) => +new Date(b.timestamp) - +new Date(a.timestamp)).slice(0, 100).map(c => ({ ...publicCheckin(c) }));
+    // GYM_CUSTOM_PASSES: `pass: { name, category } | null`, one batched lookup of this page's purchase ids. Off: no key.
+    if (passLabels && gymCustomPassesOn()) {
+      const labels = await passLabels(list.map(c => c.passPurchaseId));
+      for (const c of list) c.pass = (c.passPurchaseId && labels.get(c.passPurchaseId)) || null;
+    }
+    return { list };
   }
 
   async function updateGym({ owner, gymId, body }) {

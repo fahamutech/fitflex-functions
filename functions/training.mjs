@@ -3,9 +3,10 @@
 import '../src/bootstrap/init.mjs';
 import { requireAuth, requireAcl } from '../src/auth/jwt.mjs';
 import {
-  exerciseAdminService, trainerPlanService, trainingPlanService, trainingPreferenceService, workoutExerciseService,
+  exerciseAdminService, programmeService, trainerPlanService, trainingPlanService, trainingPreferenceService, workoutExerciseService,
 } from '../src/bootstrap/services.mjs';
 import { exerciseOptions, trainingOptions } from '../src/shared/training-taxonomy.mjs';
+import { programmesCatalogueOn } from '../src/shared/feature-flags.mjs';
 import { alternativesFor, exerciseById, listExercises, localizedExercise } from '../src/shared/exercise-library.mjs';
 
 const created = new Date().toISOString();
@@ -262,4 +263,116 @@ export const adminImportExercises = {
   requestSample: { csv: 'id,name,sw_name\nex_push_up,Push-up,Pushapu', dryRun: true },
   onGuard: exerciseGuard,
   onRequest: async (req, res) => sendExercise(res, await exerciseAdminService.importCsv(req.user.sub, req.body?.csv, { dryRun: req.body?.dryRun !== false }))
+};
+
+// ── FitFlex admin: programmes (Programmes P1, slice B1) ─────────────────────
+// Same scope as the exercise library (owner decision PD-7). These work while
+// PROGRAMMES_CATALOGUE is off; each answer says whether members can see
+// programmes yet (`catalogueOn`).
+
+const sendProgramme = (res, result, ok = 200) => (result.error
+  ? res.status(result.status).json({
+    error: result.error, ...(result.field ? { field: result.field } : {}), ...(result.reason ? { reason: result.reason } : {}),
+  })
+  : res.status(ok).json(result));
+
+const programmeSample = {
+  title: '7-day home starter', summary: 'Short bodyweight sessions to build a habit.',
+  i18n: { sw: { title: '[SW] 7-day home starter', summary: '[SW] Short bodyweight sessions to build a habit.' } },
+  goal: 'stay_fit', level: 'beginner', environment: 'home', equipment: ['none'], lengthDays: 7,
+  days: [
+    { day: 1, type: 'home', workout: { name: 'Full body 1', activityType: 'functional', estimatedDuration: 20, exercises: [{ exerciseName: 'Squat', libraryId: 'ex_bodyweight_squat', sets: 3, reps: 12 }] } },
+    { day: 2, type: 'rest' },
+    { day: 3, type: 'gym' },
+  ],
+};
+
+export const adminProgrammes = {
+  created, method: 'get', path: '/admin/programmes',
+  description: 'FitFlex admin: every programme (draft, live, retired), newest change first, each with `enrolled` (members who started it), plus `catalogueOn` (whether members can see programmes yet).',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.list())
+};
+
+export const adminProgramme = {
+  created, method: 'get', path: '/admin/programmes/:id',
+  description: 'FitFlex admin: one programme with its days, `enrolled` and `catalogueOn`.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.get(req.params.id))
+};
+
+export const adminCreateProgramme = {
+  created, method: 'post', path: '/admin/programmes',
+  description: 'FitFlex admin: write a new draft programme. title, goal, level, environment, lengthDays (7-84) are needed; summary, equipment[], i18n.sw { title, summary }, days[] are optional. days[i] is { type: gym|home|rest, workout? } for day i+1; days not sent are rest days. A workout is a workout definition (name, activityType, estimatedDuration, exercises[]). A problem answers 400 invalid_programme with the field at fault.',
+  requestSample: programmeSample,
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.create(req.user.sub, req.body || {}), 201)
+};
+
+export const adminUpdateProgramme = {
+  created, method: 'put', path: '/admin/programmes/:id',
+  description: 'FitFlex admin: change a draft (any of the create fields; the rest are kept). A live or retired programme answers 409 not_a_draft: make a new version instead.',
+  requestSample: { summary: 'Short sessions, no equipment.', lengthDays: 14 },
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.update(req.user.sub, req.params.id, req.body || {}))
+};
+
+export const adminPublishProgramme = {
+  created, method: 'post', path: '/admin/programmes/:id/publish',
+  description: 'FitFlex admin: make a draft live. Needs a summary, the Swahili title and summary, at least one gym or home day, a workout on every home day, and only live library exercises; otherwise 400 not_ready_to_publish with the field. Publishing a new version retires the live programme it was made from. Members see live programmes only while PROGRAMMES_CATALOGUE is on.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.publish(req.user.sub, req.params.id))
+};
+
+export const adminRetireProgramme = {
+  created, method: 'post', path: '/admin/programmes/:id/retire',
+  description: 'FitFlex admin: stop new starts of a live programme. Members already on it can finish it.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.retire(req.user.sub, req.params.id))
+};
+
+export const adminDuplicateProgramme = {
+  created, method: 'post', path: '/admin/programmes/:id/duplicate',
+  description: 'FitFlex admin: a new draft copied from any programme (`versionOf` points back). This is how a live programme is changed: members who started the old one keep it as it was.',
+  onGuard: exerciseGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.duplicate(req.user.sub, req.params.id), 201)
+};
+
+// ── Members: programmes (Programmes P1, slice B2) ───────────────────────────
+// Behind PROGRAMMES_CATALOGUE, checked FIRST (before any token check):
+// off → 404 { error: 'feature_disabled' }. Every signed-in member may see
+// and start free programmes (owner decision PD-2).
+
+function requireProgrammesCatalogue(req, res, next) {
+  if (!programmesCatalogueOn()) return res.status(404).json({ error: 'feature_disabled' });
+  return next();
+}
+const programmeMemberGuard = [requireProgrammesCatalogue, requireAuth('member')];
+
+export const programmesCatalogue = {
+  created, method: 'get', path: '/programmes',
+  description: 'Member: live FitFlex programmes, newest first, without their days. Optional filters: goal, level, environment (a programme for "any" place matches every place), minDays, maxDays; lang (en|sw) for title and summary. Each has dayCounts { gym, home, rest }, dayTypes[] and free. 400 invalid_filter + field. Needs PROGRAMMES_CATALOGUE (off → 404 feature_disabled, checked before sign-in).',
+  onGuard: programmeMemberGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.catalogue(req.query || {}))
+};
+
+export const programmeForMember = {
+  created, method: 'get', path: '/programmes/:id',
+  description: 'Member: one live programme with its days ({ day, type: gym|home|rest, workout: { name, activityType, estimatedDuration, exerciseCount } | null }). Drafts and retired programmes answer 404. lang (en|sw). Needs PROGRAMMES_CATALOGUE.',
+  onGuard: programmeMemberGuard,
+  onRequest: async (req, res) => sendProgramme(res, await programmeService.forMember(req.params.id, req.query?.lang))
+};
+
+export const startProgramme = {
+  created, method: 'post', path: '/programmes/:id/enrol',
+  description: 'Member: start a live programme. It becomes their training plan (programmeId set) with a day per date from startDate (YYYY-MM-DD, today .. today + 30, default today); home days and gym days with a suggested workout become planned workouts. 409 active_plan_exists + planId unless replace: true (which ends the plan they are on); 409 already_on_programme + planId; 409 programme_unavailable (draft or retired); 404 not_found; 400 invalid_start_date | start_in_past | start_too_far. lang (en|sw) names the plan. Needs PROGRAMMES_CATALOGUE.',
+  requestSample: { startDate: '2026-11-21', replace: false, lang: 'en' },
+  onGuard: programmeMemberGuard,
+  onRequest: async (req, res) => {
+    const found = await programmeService.startable(req.params.id);
+    if (found.error) return sendProgramme(res, found);
+    const result = await trainingPlanService.startProgramme(req.user.sub, found.programme, req.body || {});
+    if (result.error) return res.status(result.status).json({ error: result.error, ...(result.planId ? { planId: result.planId } : {}) });
+    res.status(201).json(result);
+  }
 };

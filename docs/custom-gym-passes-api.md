@@ -51,8 +51,20 @@ moment the payment is **approved**, not from the request.
   attached again to that purchase or to any other purchase of the same buyer, by the buyer *or* the owner (`409 cannot_add_person`
   on an add, the generic `invalid_beneficiaries` at checkout; a pending row is skipped at claim). There is no unblock route in this
   version: only a future, explicit action by the person could lift it.
-* Suspended / removed people are refused at check-in with the existing code `subscription_inactive`; an expired pass the same;
-  another gym `wrong_gym`. No new refusal code.
+* Suspended / removed people are refused at check-in with the existing code `subscription_inactive`; an expired pass the same
+  once its 24 h grace (`SUBSCRIPTION_GRACE_HOURS`, the same rule as every direct plan; this version does not change it) has
+  passed; another gym `wrong_gym`. No new refusal code. A manual check-in by the owner (`POST /owner/members/:id/checkin`)
+  refuses an expired pass immediately and does not accept a removed person (`403 not_your_member`).
+* **Phase 5A, door and check-in** (additive; `pass` keys exist only while the flag is on):
+  * `POST /owner/members/:id/checkin` on a pass person records `passPurchaseId` / `beneficiaryId` on the visit, like the QR path,
+    so the visit counts in the person's attendance and in `utilisation`.
+  * A removed person (child subscription `cancelled`) is no longer the gym's direct member: not in the owner Members list or its
+    counts, not in message audiences, not checked in by hand. Legacy direct plans, cancelled or not, are unchanged.
+  * `POST /operator/verify-qr` and `POST /operator/checkins` add `pass: { name, category, expiresAt, daysLeft, status } | null`
+    (`null` for anyone not on a custom pass). Nothing about the buyer, the other people or any contact is returned.
+  * The scan preview of a pass the owner or buyer has paused answers `eligible: false`, `reason: "subscription_inactive"`,
+    `subscription: { tier: null, status: "suspended" }`, the same refusal the check-in gives. A paused legacy plan still answers
+    `no_active_pass`.
 * A payment that is rejected / cancelled / put back to pending stops access (purchase `cancelled` / `pending_payment`,
   child subscriptions `cancelled`); approving it again re-activates the same rows.
 
@@ -103,15 +115,33 @@ moment the payment is **approved**, not from the request.
 
 Public: `GET /gyms/:id/pass-plans`, `POST /gym-pass-invitations/preview { token }`.
 
+The public gym page (`POST /public/gyms/resolve`, flag `WEB_GYM_PROFILE`) also lists a gym's ACTIVE plans as
+`membership.gymPasses[{ planId, name, description, category, durationValue, durationUnit, beneficiaryLimit, priceTzs, terms,
+termsVersion }]`: empty while `GYM_CUSTOM_PASSES` is off, never the gym id. `planId` is what `POST /me/gym-pass-purchases` takes.
+
 Member (`member` token): `POST /me/gym-pass-purchases`, `POST /me/gym-pass-purchases/:purchaseId/cancel`,
 `GET /me/gym-passes`, `POST /me/gym-passes/claim { token? }`, `POST /me/gym-passes/:purchaseId/leave`, and as buyer
 `POST /me/gym-pass-purchases/:purchaseId/beneficiaries` and `…/beneficiaries/:beneficiaryId/(suspend|resume|remove|invite)`.
 
 Owner (`gym_operator`, or `gym_staff` with the scope): plans need scope `gyms`
 (`GET|POST /owner/gyms/:gymId/pass-plans`, `PUT …/:planId`, `POST …/:planId/(activate|deactivate)`); sales and revenue need
-`payments` (`GET …/pass-sales`, `GET …/pass-summary`); people need `members` (`GET …/pass-memberships`,
+`payments` (`GET …/pass-sales`, `GET …/pass-summary[?from&to]`); people need `members` (`GET …/pass-memberships`,
 `GET …/pass-purchases/:purchaseId`, `…/beneficiaries/:beneficiaryId/attendance`, `POST …/beneficiaries`,
 `POST …/beneficiaries/:beneficiaryId/(suspend|resume|remove)`).
+
+### Owner analytics (phase 5B, additive; all behind `GYM_CUSTOM_PASSES`)
+
+No endpoint signature, migration or env var changed. Every field below is **added**; existing fields keep their names, types and values.
+
+* **`GET /owner/gyms/:gymId/pass-summary`** (scope `payments`) adds:
+  * `byPlan[]`: `{ planId, name (from the sale's snapshot), category, sales, revenueTzs, people }`, best-selling first. Sums equal `sales.count`, `sales.revenueTzs` and the `byCategory` people total.
+  * `expiring { withinDays, purchases, people }`: running (`active`) passes ending within `withinDays` (= `EXPIRING_SOON_DAYS`, 7, shared with the Members list) and the people they cover.
+  * `utilisation { visits, peopleWithVisit, peopleNeverVisited, activePeople, visitsPerActivePerson }`: `visits` = check-ins made with these sales' passes that are **not voided** (valid, disputed and flagged all count, as on the per-person attendance); `activePeople` = people whose account is attached (`status: active`) on the counted sales; `peopleWithVisit + peopleNeverVisited = activePeople`; `visitsPerActivePerson` = `visits / activePeople`, 2 decimals, `0` when nobody is active.
+  * `groups { slots, filled, fillRate }`: over **group** sales only; `slots` = the sold pass's slot limit summed per sale, `filled` = people not removed, `fillRate` = `filled / slots` (4 decimals, `0` when no group sale).
+  * Optional **`?from` (inclusive) and `?to` (exclusive)**: only sales whose payment was **approved** in the range (`PaymentRequest.decidedAt`, the date Finance reports on). With a range every sale-derived figure (sales, byCategory, byDuration, byPlan, beneficiaries, memberships, expiring, utilisation, groups) covers those sales; `plans` and `sales.pendingPayment` (no approval date yet) always describe now. An unreadable date is ignored, as on the sales list.
+  * A group purchase is ONE sale with N people; revenue is counted once. Rejected, cancelled and refunded (payment no longer approved) purchases are excluded exactly as before.
+* **`GET /operator/dashboard`** adds `passVisits` and `passMembers` (visits made with a custom pass, not voided, and the distinct members behind them, in the selected period) at the top level (selected gym), in `overall`, and on each `gymSummaries[]` row. They ignore the `memberType` filter. Absent while the flag is off.
+* **`GET /owner/gyms/:gymId/checkins`** and **`GET /operator/checkins`** add `pass: { name, category } | null` to each row (the page's purchase ids are resolved with ONE lookup; `null` for every visit not made with a custom pass). Nothing about the buyer, the other people, contacts or ids beyond the row's existing `passPurchaseId` / `beneficiaryId` is added. The key is absent while the flag is off.
 
 ### Response and error details (contract drift fixed)
 

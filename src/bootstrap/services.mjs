@@ -38,7 +38,7 @@ import { createOrgMembershipService } from '../services/org-membership-service.m
 import { createInvitationService } from '../services/invitation-service.mjs';
 import { createIdentifierService } from '../services/identifier-service.mjs';
 import { createHrOrgConversionService } from '../services/hr-org-conversion-service.mjs';
-import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, azampayBankCheckoutOn, azampayCheckoutPageOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
+import { azampayPaymentsOn, azampayTrainerProductsOn, azampayShopOrdersOn, azampaySandboxSettlesOn, azampaySandboxUnsignedCallbacksOn, azampayBankCheckoutOn, azampayCheckoutPageOn, scheduledRenewalsOn } from '../shared/feature-flags.mjs';
 import { orgOnlySponsorsOn, identityFlag, trainerSessionOutcomesOn, vendorVatOn, eventsModuleOn } from '../shared/feature-flags.mjs';
 import { createPgEventStore } from '../infra/event-store-pg.mjs';
 import { createPaymentReferenceStore } from '../infra/payment-reference-store.mjs';
@@ -147,6 +147,11 @@ import { createPartnerGate } from '../services/partner-gate.mjs';
 import { createRefundService } from '../services/refund-service.mjs';
 import { createHeldPaymentsService } from '../services/held-payments-service.mjs';
 import { heldPaymentsWorklistOn } from '../shared/feature-flags.mjs';
+import { programmesCatalogueOn } from '../shared/feature-flags.mjs';
+import { createProgrammeService } from '../services/training/programme-service.mjs';
+import { createProgrammeCheckinService } from '../services/training/programme-checkin-service.mjs';
+import { createKpiTargetService } from '../services/kpi-target-service.mjs';
+import { exerciseById } from '../shared/exercise-library.mjs';
 import { createTierHolders } from '../services/tier-holders.mjs';
 import { createB2BFinanceService } from '../services/b2b-finance-service.mjs';
 import { createCompanyDirectory } from '../services/company-directory.mjs';
@@ -240,7 +245,7 @@ import {
   deviceTokens, notifications, activities, activityRoutes, goals, workouts,
   follows, friendInvitations, blocks, socialProfiles, socialGroups, socialGroupMembers, activityKudos, activityComments, activityViews, socialReports,
   memberUsernames, usernameReleases,
-  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, gymMemberSharing, challenges, challengeParticipants,
+  trainerMemberRelationships, workoutPlans, trainingPlans, trainingExercises, programmes, programmeDayCompletions, gymMemberSharing, challenges, challengeParticipants,
   challengeTeams, challengeRewards,
   communicationPreferences, communicationCampaigns, communicationTemplates,
   partnerKycCases, partnerPeople, partnerDocuments, partnerChecks,
@@ -765,10 +770,17 @@ export const securityEventService = createSecurityEventService({
   reportsOn: securityIncidentReportsOn,
   reportsFor: (userId, ids) => securityIncidentService.reportsFor(userId, ids),
 });
+// Programmes (B3): a visit on a programme's gym day marks that day done; a void reopens it.
+// Never throws; does nothing while PROGRAMMES_CATALOGUE is off.
+export const programmeCheckins = createProgrammeCheckinService({
+  plans: trainingPlans, dayCompletions: programmeDayCompletions, checkins, enabled: programmesCatalogueOn,
+});
 export const checkInService = createCheckInService({
   users, gyms, subscriptions, checkins, trainers, getTierConfig: settingsService.getTierConfig,
-  // Two independent reactions; neither can block or fail the other or the check-in (S3: web check-in security alert).
-  onCheckin: checkin => Promise.allSettled([partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin)]),
+  // Independent reactions; none can block or fail another or the check-in (S3: web check-in security alert; B3: programme gym day).
+  onCheckin: checkin => Promise.allSettled([
+    partnerNotifier.gymCheckin(checkin), securityEventService.handleCheckin(checkin), programmeCheckins.recordCheckin(checkin),
+  ]),
   // A sponsor's B2B benefit funds the visit first; the member's own pass is the fallback.
   b2bFunding: b2bConsumptionService,
   gymOpenToPass,
@@ -782,6 +794,8 @@ export const checkinStatusService = createCheckinStatusService({
   checkins, auditLog,
   // Voiding a visit gives its B2B allowance back.
   onVoided: async ({ checkin, reason, actorId }) => {
+    // Reopens a programme gym day the visit had completed (never throws).
+    await programmeCheckins.reverseCheckin(checkin, reason);
     await b2bConsumptionService.releaseForSource({
       sourceType: 'gym_checkin', sourceId: checkin.id, reason: `check-in voided: ${reason}`, actorId,
     });
@@ -816,6 +830,7 @@ const usernamesLazy = { handleOf: userId => usernameService.handleOf(userId) };
 export const memberManagement = createMemberManagementService({
   usernames: usernamesLazy, users, gyms, subscriptions, checkins, paymentRequests, publicUserId, initFirebaseAdmin, getAdminAuth,
   onMembershipActivated: lifecycle.activated,
+  onManualVisit: row => programmeCheckins.recordCheckin(row),
 });
 export const operatorService = createOperatorService({
   users, gyms, subscriptions, checkins, checkInService, publicUserId, settingsService, memberManagement,
@@ -823,10 +838,13 @@ export const operatorService = createOperatorService({
   settlementSummary: (args) => settlementViewService.ownerDashboard(args),
   // The scanner preview refuses as the check-in would (gym_not_verified).
   gymOpenToPass,
+  // Defined further down; read at call time.
+  passLabels: ids => gymPassStore.passLabels(ids),
 });
 
 export const ownerGymService = createOwnerGymService({
   gyms, users, trainers, invoices, auditLog, gymService, trainerService, partnerGate, gymPayoutOwner,
+  passLabels: ids => gymPassStore.passLabels(ids),
   onGymRemoved: gymId => partnerMediaService.purgeSubject('gym', gymId, { cause: 'gym_deleted' }),
 });
 export const ownerStaffService = createOwnerStaffService({
@@ -903,6 +921,15 @@ if (azampayProblem) {
   console.error(`[azampay] MISCONFIGURED (${azampayProblem}): AZAMPAY_ENV is live but ${why}. AzamPay is CLOSED: nothing is offered and no callback settles until this is fixed.`);
 }
 export const azampayClient = azampayConfig ? createAzamPayClient({ settings: azampayConfig }) : null;
+// One line at start-up: what AzamPay configuration this server sees (yes/no only, never a value).
+console.info('[azampay] config', JSON.stringify({
+  appName: Boolean(process.env.AZAMPAY_APP_NAME), clientId: Boolean(process.env.AZAMPAY_CLIENT_ID),
+  clientSecret: Boolean(process.env.AZAMPAY_CLIENT_SECRET), apiKey: Boolean(process.env.AZAMPAY_API_KEY),
+  callbackUser: Boolean(process.env.AZAMPAY_CALLBACK_USER), callbackPassword: Boolean(process.env.AZAMPAY_CALLBACK_PASSWORD),
+  envSetting: process.env.AZAMPAY_ENV ?? null, environment: azampayConfig?.environment ?? null, client: Boolean(azampayConfig),
+  problem: azampayProblem ?? null, payments: azampayPaymentsOn(), sandboxSettles: azampaySandboxSettlesOn(),
+  sandboxUnsignedCallbacks: azampaySandboxUnsignedCallbacksOn(),
+}));
 if (azampayConfig && azampayPaymentsOn() && azampayConfig.environment !== 'live') {
   console.warn(`[azampay] payments are ON against the SANDBOX${azampaySandboxSettlesOn() ? ' and sandbox payments settle real plans (AZAMPAY_SANDBOX_SETTLES)' : ' but will not be offered (set AZAMPAY_SANDBOX_SETTLES to rehearse)'}`);
 }
@@ -1154,8 +1181,16 @@ export const workoutExerciseService = createWorkoutExerciseService({
 });
 export const trainingPlanService = createTrainingPlanService({
   plans: trainingPlans, workouts, users, engine: trainingRecommendationEngine,
-  trainers, relationships: trainerMemberRelationships,
+  trainers, relationships: trainerMemberRelationships, dayCompletions: programmeDayCompletions,
   notify: (userId, message) => notificationService.notify(userId, message),
+});
+// Programmes P1 (B1): FitFlex's authoring of published day-by-day programmes. Works while
+// PROGRAMMES_CATALOGUE is off, so they can be prepared before launch.
+export const programmeService = createProgrammeService({
+  programmes, plans: trainingPlans, auditLog,
+  exerciseExists: id => Boolean(exerciseById(id)?.active),
+  ensureLibrary: () => exerciseAdminService.ensureFresh(),
+  catalogueOn: programmesCatalogueOn,
 });
 export const trainerPlanService = createTrainerPlanService({
   plans: trainingPlans, workouts, users, relationships: trainerMemberRelationships, trainers, workoutPlans,
@@ -1831,3 +1866,6 @@ opsService.register({
   },
 });
 void eventsRunsOn; void eventsMedalArtOn; void eventsResultsPublicOn; void eventsResultsOn;
+
+// FR-K01: KPI targets admins view and change in the portal (audited).
+export const kpiTargetService = createKpiTargetService({ db, auditLog });
