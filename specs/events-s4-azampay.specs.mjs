@@ -15,6 +15,7 @@ const PUB = publicKey.export({ type: 'spki', format: 'pem' });
 const CLIENT_ID = 'spec-client';
 const remote = new Map();   // transactionId → { amount, utilityref (our reference), msisdn }
 let checkouts = 0;
+const pages = [];   // PostCheckout bodies (the hosted payment page)
 const server = http.createServer((req, res) => {
   let body = '';
   req.on('data', c => { body += c; });
@@ -22,6 +23,11 @@ const server = http.createServer((req, res) => {
     const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
     if (req.url.startsWith('/AppRegistration/GenerateToken')) return send(200, { data: { accessToken: 'tok', expire: new Date(Date.now() + 3600_000).toISOString() }, success: true });
     if (req.url.startsWith('/azampay/v1/public-key')) return send(200, { success: true, format: 'Pem', publicKey: PUB });
+    if (req.url.startsWith('/api/v1/Partner/PostCheckout')) {
+      const b = JSON.parse(body || '{}');
+      pages.push(b);
+      return send(200, `http://127.0.0.1:${server.address().port}/pay/${b.externalId}`);   // answered as a JSON string
+    }
     if (req.url.startsWith('/azampay/mno/checkout')) {
       const b = JSON.parse(body || '{}');
       checkouts += 1;
@@ -40,6 +46,11 @@ process.env.AZAMPAY_CLIENT_SECRET = 'spec-secret';
 process.env.AZAMPAY_AUTH_URL = HOST;
 process.env.AZAMPAY_CHECKOUT_URL = HOST;
 process.env.AZAMPAY_DISBURSE_URL = HOST;
+// the hosted payment page (its own spec is azampay-methods-routes): a vendor, a place to come back to, the fake's host
+process.env.AZAMPAY_VENDOR_ID = 'e9b57fab-1850-44d4-8499-71fd15c845a0';
+process.env.AZAMPAY_VENDOR_NAME = 'FitFlex Africa';
+process.env.AZAMPAY_PAGE_HOSTS = '127.0.0.1';
+process.env.PUBLIC_API_URL ||= 'https://api.fitflex.test';
 delete process.env.AZAMPAY_ENV;
 delete process.env.NODE_ENV;
 
@@ -48,16 +59,16 @@ await ensureInit();
 const { eventStore, eventsPaymentsService, mobileMoneyService } = await import('../src/bootstrap/services.mjs');
 const { createEventOrder, quoteEventOrder, resetEventsRegistrationLimits } = await import('../functions/events-registration.mjs');
 const { payForEventOrder, eventOrderPaymentStatus, resetEventsPaymentLimits } = await import('../functions/events-payments.mjs');
-const { payByMobileMoney, refreshMobileMoneyPayment, paymentOptions } = await import('../functions/mobile-money.mjs');
+const { payByMobileMoney, payByCheckoutPage, refreshMobileMoneyPayment, paymentOptions } = await import('../functions/mobile-money.mjs');
 const { azampayWebhook } = await import('../functions/webhooks.mjs');
 const { adminDecidePaymentRequest } = await import('../functions/admin-payments.mjs');
 const { callbackSignedText } = await import('../src/integrations/payments/azampay.mjs');
-const { PROMPT_TTL_MS } = await import('../src/shared/mobile-money-claim.mjs');
+const { PROMPT_TTL_MS, PAGE_TTL_MS } = await import('../src/shared/mobile-money-claim.mjs');
 const { harness, s4On, s4Off, txId, uid, phone, D } = await import('./fixtures/events-s4.mjs');
 
 const h = harness();
 const { db, call } = h;
-afterEach(() => { s4Off(); resetEventsRegistrationLimits(); resetEventsPaymentLimits(); });
+afterEach(() => { s4Off(); delete process.env.AZAMPAY_CHECKOUT_PAGE; resetEventsRegistrationLimits(); resetEventsPaymentLimits(); });
 after(async () => { await db('OpsException').where('dedupeKey', 'like', 'evpay:%').del().catch(() => {}); await h.cleanup(); server.close(); await db.destroy(); });
 
 const key = () => `az_${uid('').slice(1)}`;
@@ -110,7 +121,10 @@ test('gating: a member\'s order is payable only through AzamPay — the event fl
   const { b } = await setup();
   assert.equal(eventsPaymentsService.mode(), 'provider');
   assert.equal(eventsPaymentsService.optionsBlock().payment, 'provider');
-  assert.ok(!('manualConfirmHours' in eventsPaymentsService.optionsBlock()));
+  assert.equal(eventsPaymentsService.optionsBlock().manualConfirmHours, 24, 'the organisation-notice confirm time (EVENTS_MANUAL_CONFIRM_SLA_HOURS), while notices are on');
+  delete process.env.EVENTS_PAYMENTS_MANUAL;
+  assert.ok(!('manualConfirmHours' in eventsPaymentsService.optionsBlock()), 'not without organisation notices');
+  process.env.EVENTS_PAYMENTS_MANUAL = '1';
   const listed = async () => (await call(paymentOptions, b.claims, {})).body;
   assert.deepEqual((await listed()).mobileMoney.products, ['FITFLEX_PASS', 'GYM_SUBSCRIPTION', 'EVENT_ORDER']);
   assert.deepEqual([(await listed()).provider, 'manual' in (await listed())], ['azampay', false]);
@@ -416,6 +430,47 @@ test('the real wiring for a product that is not an event (a gym plan): held mone
     await db('PaymentRequest').where({ id: payId }).del();
     await db('Subscription').where({ id: subId }).del();
   }
+});
+
+test('an event order paid on the hosted payment page: the places are held for the page\'s whole window (not the 10-minute prompt rule), a failed try on the page does not end the attempt, and a payment at minute 25 settles', async () => {
+  const { f, b } = await setup();
+  process.env.AZAMPAY_CHECKOUT_PAGE = '1';
+  const o = await place(f, b);
+  const init = await call(payForEventOrder, b.claims, { params: { id: o.order.id }, headers: { 'Idempotency-Key': key() }, body: {} });
+  assert.equal(init.status, 201, JSON.stringify(init.body));
+  const requestId = init.body.next.paymentRequestId;
+  const started = Date.now();
+  const page = await call(payByCheckoutPage, b.claims, { params: { id: requestId }, body: { returnTo: 'app' } });
+  assert.equal(page.status, 202, JSON.stringify(page.body));
+  const ref = pages.at(-1).externalId;
+  assert.deepEqual([page.body.method, page.body.checkoutUrl, pages.at(-1).amount], ['page', `${HOST}/pay/${ref}`, '20000']);
+  // the hold now covers the page's window
+  const held = await orderOf(o.order.id);
+  assert.ok(+new Date(held.holdExpiresAt) >= started + PAGE_TTL_MS, `held until ${held.holdExpiresAt}`);
+  assert.deepEqual([(await paymentOf(o.order.id)).status, (await paymentOf(o.order.id)).providerTransactionId], ['pending', ref]);
+  // 25 minutes pass: the hold has 5 minutes left, the prompt window is long gone, the hourly sweep runs
+  const ago = 25 * 60_000;
+  await db('PaymentRequest').where({ id: requestId }).update({ promptedAt: new Date(Date.now() - ago) });
+  await db('EventPayment').where({ orderId: o.order.id }).update({ submittedAt: new Date(Date.now() - ago), updatedAt: new Date(Date.now() - ago) });
+  await db('EventOrder').where({ id: o.order.id }).update({ holdExpiresAt: new Date(+new Date(held.holdExpiresAt) - ago) });
+  assert.ok(+new Date((await orderOf(o.order.id)).holdExpiresAt) > Date.now(), 'the hold still stands at minute 25');
+  await eventStore.expireHolds({ at: new Date() });
+  await eventsPaymentsService.sweep();
+  assert.deepEqual([(await orderOf(o.order.id)).status, (await paymentOf(o.order.id)).status, (await db('PaymentRequest').where({ id: requestId }).first()).status], ['awaiting_payment', 'pending', 'pending'], 'neither the hold job nor the sweep ended it');
+  // a first try on the page fails: the attempt stays open (EventPayment pending, request pending on the page reference)
+  const failed = await callback({ ...cbOf('none'), utilityref: ref, transid: `SPEC_TRY1_${Date.now()}`, amount: '20000', transactionstatus: 'failure', message: 'Insufficient funds' });
+  assert.equal(failed.statusCode, 200);
+  const still = await db('PaymentRequest').where({ id: requestId }).first();
+  assert.deepEqual([still.status, still.provider, still.reference, (await paymentOf(o.order.id)).status], ['pending', 'azampay', ref, 'pending']);
+  // the retry on the same page succeeds at minute 25: confirmed, one ticket, AzamPay's transaction recorded
+  const txn = `SPEC_PAGE_${Date.now()}`;
+  const done = await callback({ ...cbOf('none'), utilityref: ref, transid: txn, amount: '20000' });
+  assert.equal(done.statusCode, 200);
+  const settled = await db('PaymentRequest').where({ id: requestId }).first();
+  assert.deepEqual([settled.status, settled.reference, settled.checkoutUrl, (await orderOf(o.order.id)).status, await ticketsOf(o.order.id)], ['approved', txn, null, 'confirmed', 1]);
+  // a phone prompt still extends by the prompt rule only
+  const q = await prompted(f, await member());
+  assert.ok(+new Date((await orderOf(q.orderId)).holdExpiresAt) < Date.now() + PAGE_TTL_MS, 'a prompt does not get the page window');
 });
 
 test('rawRedacted keeps only the allowlisted AzamPay fields (never the signature, the password, the clientId or a phone number)', async () => {

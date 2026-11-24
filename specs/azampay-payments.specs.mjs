@@ -40,7 +40,7 @@ test('settings: all three credentials needed; sandbox unless live AND the live h
   assert.deepEqual(s.hosts, AZAMPAY_SANDBOX_HOSTS);
   // live without AzamPay's live hosts is CLOSED (no settings, no client): never quietly the sandbox
   assert.equal(azampaySettings({ ...base, AZAMPAY_ENV: 'live' }), null);
-  const live = azampaySettings({ ...base, AZAMPAY_ENV: 'live', AZAMPAY_AUTH_URL: 'https://a.live/', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_URL: 'https://d.live' });
+  const live = azampaySettings({ ...base, AZAMPAY_ENV: 'live', AZAMPAY_AUTH_URL: 'https://a.live/', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_URL: 'https://d.live', AZAMPAY_CALLBACK_USER: 'u', AZAMPAY_CALLBACK_PASSWORD: 'p' });
   assert.equal(live.environment, 'live');
   assert.equal(live.hosts.auth, 'https://a.live');
   assert.equal(azampaySettings({ ...base, AZAMPAY_ENV: 'Liv', AZAMPAY_AUTH_URL: 'x', AZAMPAY_CHECKOUT_URL: 'y', AZAMPAY_DISBURSE_URL: 'z' }).environment, 'sandbox');
@@ -65,8 +65,18 @@ test('AZAMPAY_ENV=live fails closed: incomplete or non-https live hosts give no 
     assert.equal(azampaySettings(env), null);
   }
   // collections need only the auth and checkout hosts; payouts stay closed without the disbursement host
-  const live = azampaySettings({ ...base, ...A, ...C, AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
-  assert.equal(azampayConfigProblem({ ...base, ...A, ...C }), null);
+  // live also needs the callback user AND password (a second shared secret on every callback): closed without both
+  const AUTH = { AZAMPAY_CALLBACK_USER: 'azam-user', AZAMPAY_CALLBACK_PASSWORD: 'azam-pass' };
+  for (const env of [{ ...base, ...A, ...C }, { ...base, ...A, ...C, AZAMPAY_CALLBACK_USER: 'azam-user' }, { ...base, ...A, ...C, AZAMPAY_CALLBACK_PASSWORD: 'azam-pass' }, { ...base, ...A, ...C, AZAMPAY_CALLBACK_USER: ' ', AZAMPAY_CALLBACK_PASSWORD: '' }]) {
+    assert.equal(azampayConfigProblem(env), 'live_callback_auth_missing', JSON.stringify(Object.keys(env)));
+    assert.equal(azampaySettings(env), null);
+  }
+  assert.equal(azampayConfigProblem({ ...base, ...AUTH }), 'live_hosts_missing', 'the hosts are named first');
+  const live = azampaySettings({ ...base, ...A, ...C, ...AUTH, AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
+  assert.equal(azampayConfigProblem({ ...base, ...A, ...C, ...AUTH }), null);
+  assert.deepEqual([live.callbackUser, live.callbackPassword], ['azam-user', 'azam-pass']);
+  // the sandbox may run without them, as before
+  assert.equal(azampaySettings({ ...base, AZAMPAY_ENV: 'sandbox' }).callbackUser, null);
   assert.deepEqual([live.environment, live.hosts.auth, live.hosts.checkout, live.hosts.disburse], ['live', 'https://auth.live', 'https://checkout.live', null]);
   assert.equal(createAzamPayClient({ settings: live }).payoutsConfigured(), false);
   // the sandbox is unaffected, and a typo is still the sandbox (never live)
@@ -76,7 +86,7 @@ test('AZAMPAY_ENV=live fails closed: incomplete or non-https live hosts give no 
 });
 
 test('payouts without the disbursement host are refused before any call', async () => {
-  const live = azampaySettings({ AZAMPAY_APP_NAME: 'F', AZAMPAY_CLIENT_ID: 'cid', AZAMPAY_CLIENT_SECRET: 's', AZAMPAY_ENV: 'live', AZAMPAY_AUTH_URL: 'https://a.live', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
+  const live = azampaySettings({ AZAMPAY_APP_NAME: 'F', AZAMPAY_CLIENT_ID: 'cid', AZAMPAY_CLIENT_SECRET: 's', AZAMPAY_ENV: 'live', AZAMPAY_CALLBACK_USER: 'u', AZAMPAY_CALLBACK_PASSWORD: 'p', AZAMPAY_AUTH_URL: 'https://a.live', AZAMPAY_CHECKOUT_URL: 'https://c.live', AZAMPAY_DISBURSE_PUBLIC_KEY: PUB });
   let calls = 0;
   const c = createAzamPayClient({ settings: live, fetchFn: async () => { calls += 1; throw new Error('must not be called'); } });
   await assert.rejects(c.disburse({ source: {}, destination: {}, amountTzs: 1000, externalReferenceId: 'p1', checksumText: 'x' }), (e) => e.code === 'payouts_not_configured');
@@ -321,8 +331,8 @@ const PAY = { memberId: 'm1', paymentRequestId: 'pay_1', phone: '0754123456' };
 
 test('options name AzamPay; pay sends the request\'s own amount, our reference and the chosen wallet', async () => {
   const w = world();
-  assert.deepEqual(w.service.options(), { enabled: true, provider: 'azampay', environment: 'sandbox' });
-  assert.deepEqual(world({ canSettle: false }).service.options(), { enabled: false, provider: 'azampay', environment: null });
+  assert.deepEqual(w.service.options(), { enabled: true, provider: 'azampay', environment: 'sandbox', methods: ['mobile_money'] });
+  assert.deepEqual(world({ canSettle: false }).service.options(), { enabled: false, provider: 'azampay', environment: null, methods: [] });
   const out = await w.service.pay({ ...PAY, network: 'Azampesa' });
   assert.equal(out.status, 202);
   const sent = w.remote.initiated[0];

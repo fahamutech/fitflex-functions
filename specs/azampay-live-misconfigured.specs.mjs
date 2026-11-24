@@ -33,11 +33,11 @@ test('the server says at boot, once and distinctly, that AzamPay is closed', () 
 
 test('there is no client: nothing is offered, paying is 404, the callback route is 403, a callback settles nothing', async () => {
   assert.equal(azampayClient, null);
-  assert.deepEqual(mobileMoneyService.options(), { enabled: false, provider: 'azampay', environment: null });
+  assert.deepEqual(mobileMoneyService.options(), { enabled: false, provider: 'azampay', environment: null, methods: [] });
   assert.deepEqual(mobileMoneyService.payableProducts('member'), []);
   const opts = res();
   await paymentOptions.onRequest({ user: { userType: 'member' } }, opts);
-  assert.deepEqual(opts.body, { enabled: false, provider: 'azampay', environment: null });
+  assert.deepEqual(opts.body, { enabled: false, provider: 'azampay', environment: null, methods: [] });
   const pay = res();
   await payByMobileMoney.onRequest({ user: { sub: 'm1' }, params: { id: 'pay_x' }, body: { phone: '0754123456' } }, pay);
   assert.deepEqual([pay.statusCode, pay.body.error], [404, 'feature_disabled']);
