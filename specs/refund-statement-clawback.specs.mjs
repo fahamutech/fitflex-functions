@@ -555,3 +555,54 @@ test('M3: the background sweep does nothing without REFUND_CLAWBACK_FROM, ignore
     if (before === undefined) delete process.env.REFUND_CLAWBACK_FROM; else process.env.REFUND_CLAWBACK_FROM = before;
   }
 }));
+
+// ── hardening after the Slice D security re-review (2026-11-24) ──────────────
+
+test('R1: raising a clawback locks the source statement row, so a void confirmed at the same time cannot slip past it', () => inRollback(async (trx) => {
+  const x = await settledPass(trx);
+  await pay(x.workflow, x.d.id);          // paid source: nothing else would lock it
+  await pay(x.workflow, x.c.id);
+  const dec = await december(trx, x.w);
+  // The lock cannot be seen from another connection (the test's rows are uncommitted), so watch the statements sent.
+  const sent = [];
+  const onQuery = (q) => sent.push(String(q.sql));
+  db.on('query', onQuery);
+  let out;
+  try { out = await dec.refundClawback.raiseForRefund({ refund: paidRefund(x.m, 250000), actorId: 'payer' }); } finally { db.removeListener('query', onQuery); }
+  assert.equal(out.status, 'raised');
+  const locked = sent.filter((q) => /from "GymSettlement" where "id" = \$1.* for update/i.test(q));
+  assert.equal(locked.length, 2, 'each source statement (gym C and gym D) is read FOR UPDATE');
+}));
+
+test('R3: with REFUND_END_ACCESS_DEFAULT on, endAccess must be true or false; anything else is refused and changes nothing', async () => {
+  for (const bad of ['false', 'true', 0, 1, 'yes', {}, []]) {
+    let f = refundFixture({ endAccess: true });
+    f.refunds.rows[0].status = 'requested';
+    let out = await f.service.decide({ id: 'rfd1', body: { decision: 'approve', endAccess: bad }, actorId: 'approver' });
+    assert.equal(out.error, 'invalid_end_access', `decide ${JSON.stringify(bad)}`);
+    assert.equal(out.status, 400);
+    assert.equal(f.refunds.rows[0].status, 'requested');
+    assert.equal(endedOf(f), false);
+    f = refundFixture({ endAccess: true });
+    f.refunds.rows.length = 0;
+    out = await f.service.adminRaise({ body: { paymentRequestId: 'pay1', reasonCode: 'member_cancelled', endAccess: bad }, actorId: 'raiser' });
+    assert.equal(out.error, 'invalid_end_access', `raise ${JSON.stringify(bad)}`);
+    assert.equal(f.refunds.rows.length, 0);
+  }
+  // Booleans and "not sent" (also null) still work.
+  let f = refundFixture({ endAccess: true });
+  assert.equal((await approveRequested(f, { endAccess: null })).error, undefined);
+  assert.equal(endedOf(f), true);
+  f = refundFixture({ endAccess: true });
+  assert.equal((await approveRequested(f, { endAccess: false })).error, undefined);
+  assert.equal(endedOf(f), false);
+});
+
+test('R3: flag off, endAccess is read exactly as before (only a real true ends it; nothing is refused)', async () => {
+  let f = refundFixture({ endAccess: false });
+  assert.equal((await approveRequested(f, { endAccess: 'true' })).error, undefined);
+  assert.equal(endedOf(f), false);
+  f = refundFixture({ endAccess: false });
+  assert.equal((await approveRequested(f, { endAccess: true })).error, undefined);
+  assert.equal(endedOf(f), true);
+});

@@ -60,7 +60,9 @@ export function createRefundClawbackService({ db = defaultDb, workflow = null, n
       const actor = refund.paidBy || actorId || SYSTEM_ACTOR;
 
       for (const line of [...lines].sort((a, b) => (a.gymId < b.gymId ? -1 : 1))) {
-        const source = await q('GymSettlement').where({ id: line.gymSettlementId }).first();
+        // FOR UPDATE: a void confirmed at the same moment waits for this raise (and then cancels what it raised), or this
+        // raise waits for the void and sees 'voided'. Without it the clawback could land on a statement that is never paid.
+        const source = await q('GymSettlement').where({ id: line.gymSettlementId }).forUpdate().first();
         const skip = (reason) => out.skipped.push({ gymId: line.gymId, gymSettlementId: line.gymSettlementId, reason });
         if (!source || source.mode !== 'live') { skip('not_live'); continue; }
         if (source.status === 'voided') { skip('statement_voided'); continue; }   // never paid
