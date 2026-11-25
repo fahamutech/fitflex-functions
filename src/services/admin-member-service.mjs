@@ -8,6 +8,8 @@ import { normalizeEmail, sameEmail } from '../shared/identifiers.mjs';
 import { parseDateOfBirthInput } from '../shared/date-of-birth.mjs';
 import { userAuditSnapshot } from '../shared/audit-redact.mjs';
 import { checkReason } from '../shared/admin-reason.mjs';
+import { currentSubscription, effectiveSubscriptionStatus, SCHEDULED } from '../shared/subscription-status.mjs';
+import { productTypeOfPayment } from '../shared/payment-product.mjs';
 
 export function createAdminMemberService({ users, subscriptions, paymentRequests, checkins, gyms, auditLog, issueQr, transaction = null }) {
   async function latestMemberSubscription(memberId) {
@@ -24,6 +26,18 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
   function slimPendingPayment(p) {
     if (!p) return null;
     return { id: p.id, amountTzs: p.amountTzs, tier: p.tier, status: p.status, requestedAt: p.requestedAt };
+  }
+
+  /** The plan the member's account runs on (paid, not ended if one is running), with its status derived from its dates. */
+  function slimCurrentPlan(sub) {
+    if (!sub) return null;
+    return { id: sub.id, tier: sub.tier ?? null, type: sub.type, plan: sub.plan ?? null, status: effectiveSubscriptionStatus(sub), expiresAt: sub.expiresAt ?? null };
+  }
+
+  /** A paid renewal waiting for the current plan to end. */
+  function slimScheduledPlan(sub) {
+    if (!sub) return null;
+    return { id: sub.id, tier: sub.tier ?? null, type: sub.type, plan: sub.plan ?? null, startsAt: sub.startedAt ?? null };
   }
 
   async function list() {
@@ -53,7 +67,9 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
 
     return allMembers.map(u => {
       const sub = (subsByMember.get(u.id) || []).sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
-      const pendingPays = pendingByMember.get(u.id) || [];
+      const memberSubs = subsByMember.get(u.id) || [];
+      const pendingPays = (pendingByMember.get(u.id) || []).sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt));
+      const scheduled = memberSubs.filter(s => s.status === SCHEDULED).sort((a, b) => +new Date(a.startedAt) - +new Date(b.startedAt))[0] || null;
       return {
         id: u.id,
         email: u.email || null,
@@ -64,7 +80,12 @@ export function createAdminMemberService({ users, subscriptions, paymentRequests
         memberProfile: u.memberProfile || null,
         createdAt: u.createdAt,
         subscription: slimSub(sub),
-        pendingPayment: slimPendingPayment(pendingPays.sort((a, b) => +new Date(b.requestedAt) - +new Date(a.requestedAt))[0] || null),
+        pendingPayment: slimPendingPayment(pendingPays[0] || null),
+        // What the Members table shows (additive; `subscription` and `pendingPayment` above keep their old meaning for older portal builds):
+        // the plan the account runs on, a paid renewal that is waiting, and every open request labelled by what it buys.
+        currentPlan: slimCurrentPlan(currentSubscription(memberSubs)),
+        scheduledPlan: slimScheduledPlan(scheduled),
+        openPayments: pendingPays.map(p => ({ ...slimPendingPayment(p), productType: productTypeOfPayment(p, memberSubs.find(s => s.id === p.subscriptionId) || null) })),
       };
     });
   }
