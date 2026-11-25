@@ -552,6 +552,24 @@ test('an upgrade whose plan ended before the money arrived is held, not approved
   assert.equal(w.audited('payment_mobile_money_held')[0].after.error, 'upgrade_plan_not_active');
 });
 
+test('an upgrade whose plan has already ended is refused BEFORE any prompt (409), so no money is taken and held', async () => {
+  const start = iso(Date.now() - 25 * DAY);
+  const w = world({ requests: [], subs: [{ id: 'sub_old', memberId: 'm1', type: 'platform_pass', tier: 'basic', status: 'active', startedAt: start, cycleStartedAt: start, expiresAt: iso(Date.now() + DAY) }] });
+  w.clock.t = Date.now();
+  const up = await w.subscriptionService.upgradePass({ memberId: 'm1', tier: 'pro' });
+  w.subscriptions.rows[0].expiresAt = iso(Date.now() - DAY);
+  const out = await w.service.pay({ ...PAY, paymentRequestId: up.paymentRequest.id });
+  assert.deepEqual([out.status, out.error], [409, 'upgrade_plan_not_active']);
+  assert.equal(w.remote.initiated.length, 0, 'nothing was sent to the phone');
+  const req = w.paymentRequests.rows[0];
+  assert.deepEqual([req.status, req.reference ?? null], ['pending', null], 'the request is not claimed');
+  // another member's plan named on the request is refused too
+  w.subscriptions.rows[0].expiresAt = iso(Date.now() + DAY);
+  w.subscriptions.rows[0].memberId = 'm2';
+  assert.deepEqual((await w.service.pay({ ...PAY, paymentRequestId: up.paymentRequest.id })).error, 'upgrade_plan_not_found');
+  assert.equal(w.remote.initiated.length, 0);
+});
+
 test('a gym plan is paid the same way; while its prompt is out the plan cannot be cancelled, after the window it can', async () => {
   const w = world({
     subs: [{ id: 'sub_g', memberId: 'm1', type: 'direct_sub', plan: 'monthly', homeGymId: 'gym_1', status: 'payment_pending', startedAt: iso(Date.now()), expiresAt: iso(Date.now() + 30 * DAY) }],
