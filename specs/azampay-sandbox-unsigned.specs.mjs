@@ -120,7 +120,7 @@ function world() {
     async initiatePayment() { n += 1; return { transactionId: `TXN_${n}` }; },
   };
   const service = createMobileMoneyService({ paymentRequests, subscriptions, adminPaymentService, auditLog, client, enabled: () => true, canSettle: () => true });
-  return { service, audit, req: () => paymentRequests.rows[0], sub: () => subscriptions.rows[0] };
+  return { service, audit, clientRef: client, req: () => paymentRequests.rows[0], sub: () => subscriptions.rows[0] };
 }
 const PAY = { memberId: 'm1', paymentRequestId: 'pay_1', phone: '0754123456' };
 
@@ -163,4 +163,62 @@ test('service: once settled, an unsigned repeat is refused and activates nothing
   const again = await w.service.handleCallback(body(), { signed: false });
   assert.equal(again.status, 403);
   assert.equal(w.req().status, 'approved');
+});
+
+// ── AzamPay's sandbox calls back before its checkout call answers (2026-11-25) ──
+
+/** A world whose AzamPay delivers `early` callbacks (unsigned) while the checkout call is still under way. */
+function earlyWorld(early, { transactionId = 'TXN_1' } = {}) {
+  const w = world();
+  const seen = [];
+  const svc = w.service;
+  // Reach the client the service holds: its initiatePayment is the hook point.
+  return {
+    ...w, seen,
+    async pay() {
+      const original = w.clientRef.initiatePayment;
+      w.clientRef.initiatePayment = async (...a) => {
+        for (const cb of early) seen.push(await svc.handleCallback(cb, { signed: false }));
+        return { transactionId };
+      };
+      try { return await svc.pay(PAY); } finally { w.clientRef.initiatePayment = original; }
+    },
+  };
+}
+
+test('service: an unsigned success that arrives BEFORE the checkout answer is kept, then settles once the answer names it', async () => {
+  const w = earlyWorld([body({ utilityref: 'pay_1.a1', transid: 'TXN_1', reference: 'TXN_1', externalreference: 'TXN_1' })]);
+  const lines = [];
+  const info = console.info;
+  console.info = (...a) => lines.push(a.join(' '));
+  let out;
+  try { out = await w.pay(); } finally { console.info = info; }
+  assert.deepEqual(w.seen.map((s) => [s.status, s.state]), [[200, 'parked']]);
+  assert.deepEqual([out.status, out.state], [200, 'completed']);
+  assert.deepEqual([w.req().status, w.sub().status], ['approved', 'active']);
+  assert.ok(w.audit.some((a) => a.action === 'payment_mobile_money_unsigned_parked'));
+  assert.ok(lines.some((l) => l.includes('[azampay] early_callback') && l.includes('"outcome":"completed"')));
+  // A repeat afterwards activates nothing twice.
+  assert.equal((await w.service.handleCallback(body({ transid: 'TXN_1' }), { signed: false })).status, 403);
+});
+
+test('service: a kept early callback for ANOTHER transaction, or with the wrong amount, approves nothing', async () => {
+  const other = earlyWorld([body({ transid: 'TXN_X', reference: 'TXN_X', externalreference: 'TXN_X' })]);
+  const a = await other.pay();
+  assert.deepEqual([a.status, a.state], [202, 'in_progress']);
+  assert.deepEqual([other.req().status, other.sub().status], ['pending', 'payment_pending']);
+
+  const short = earlyWorld([body({ transid: 'TXN_1', amount: '100' })]);
+  const b = await short.pay();
+  assert.equal(b.state, 'in_progress');
+  assert.equal(short.req().status, 'pending');
+  assert.ok(short.audit.some((e) => e.action === 'payment_mobile_money_amount_mismatch'));
+});
+
+test('service: early callbacks are bounded per request (5); the rest are refused as before', async () => {
+  const flood = Array.from({ length: 8 }, (_, i) => body({ transid: `TXN_F${i}`, reference: `R${i}`, externalreference: `E${i}` }));
+  const w = earlyWorld(flood);
+  await w.pay();
+  assert.deepEqual(w.seen.map((s) => s.state ?? s.error), [...Array(5).fill('parked'), ...Array(3).fill('unsigned_unmatched')]);
+  assert.equal(w.req().status, 'pending');
 });
