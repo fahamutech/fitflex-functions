@@ -9,11 +9,17 @@ import { updateIf } from './conditional-update.mjs';
  * The subscription a member's account runs on: the most recently started
  * one that has been paid for (active, expired or suspended). Subscriptions
  * still waiting on, or refused, payment don't count.
+ *
+ * A plan that has not ended wins over a later-started one that has: a day
+ * plan bought (and finished) during a month-long pass must not hide the pass
+ * that is still running. Only when every paid plan has ended is the newest
+ * one returned, so the member still sees which plan ended and when.
  */
-export function currentSubscription(subs) {
-  return (subs || [])
+export function currentSubscription(subs, now = new Date()) {
+  const paid = (subs || [])
     .filter(s => ['active', 'expired', 'suspended'].includes(s.status))
-    .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt))[0] || null;
+    .sort((a, b) => +new Date(b.startedAt) - +new Date(a.startedAt));
+  return paid.find(s => effectiveSubscriptionStatus(s, now) !== 'expired') || paid[0] || null;
 }
 
 /**

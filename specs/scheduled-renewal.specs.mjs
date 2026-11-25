@@ -149,3 +149,45 @@ test('one renewal may wait at a time; /me lists it and promotes it when it start
   assert.equal(me.subscription.status, 'active');
   assert.deepEqual(me.scheduledRenewals, []);
 });
+
+// Found on a live account 2026-11-25: a gym day plan bought (and ended) during a 30-day pass
+// became "the current plan", so the app said the pass payment was still being confirmed.
+const dayPlanEnded = (t = at) => ({ id: 'sub_day', memberId: 'm1', type: 'direct_sub', plan: 'daily', homeGymId: 'g1', status: 'active', startedAt: t(-9), cycleStartedAt: t(-9), expiresAt: t(-8), renewsAt: t(-8) });
+
+test('the current plan is one still running, not a later-started plan that has ended', () => {
+  const pass = running({ id: 'sub_pass', tier: 'executive', startedAt: at(-23), cycleStartedAt: at(-23), expiresAt: at(7) });
+  assert.equal(currentSubscription([pass, dayPlanEnded()], NOW).id, 'sub_pass');
+  // stored status already flipped to expired: same answer
+  assert.equal(currentSubscription([pass, { ...dayPlanEnded(), status: 'expired' }], NOW).id, 'sub_pass');
+  // two plans running: the later-started one, as before
+  const gymWeek = { ...dayPlanEnded(), id: 'sub_week', startedAt: at(-2), expiresAt: at(5) };
+  assert.equal(currentSubscription([pass, gymWeek], NOW).id, 'sub_week');
+  // everything ended: the newest, so the member sees what ended last
+  assert.equal(currentSubscription([pass, dayPlanEnded()], new Date(at(8))).id, 'sub_day');
+  // a suspended newest plan is still the current one (suspension is not hidden by an older plan)
+  assert.equal(currentSubscription([pass, { ...gymWeek, status: 'suspended' }], NOW).id, 'sub_week');
+  // unpaid or queued plans never count
+  assert.equal(currentSubscription([pending(), { ...pending({ id: 'q' }), status: SCHEDULED }], NOW), null);
+});
+
+test('/me: a running pass stays current after a day plan ended, while the renewal waits and an old request is open', async () => {
+  const pass = running({ id: 'sub_pass', tier: 'basic', startedAt: atReal(-23), cycleStartedAt: atReal(-23), expiresAt: atReal(7), renewsAt: atReal(7) }, atReal);
+  const sched = { ...pending({ id: 'sub_sched' }, atReal), status: SCHEDULED, startedAt: atReal(7), cycleStartedAt: atReal(7), expiresAt: atReal(37), renewsAt: atReal(37) };
+  const unpaidDay = { id: 'sub_unpaid', memberId: 'm1', type: 'direct_sub', plan: 'daily', homeGymId: 'g1', status: 'payment_pending', startedAt: atReal(-8), expiresAt: atReal(-7) };
+  const subscriptions = memStore([pass, dayPlanEnded(atReal), sched, unpaidDay]);
+  const paymentRequests = memStore([{ id: 'pay_old', memberId: 'm1', subscriptionId: 'sub_unpaid', gymId: 'g1', plan: 'daily', amountTzs: 10_000, status: 'pending', provider: 'admin_approved', requestedAt: atReal(-8) }]);
+  const tiers = [{ key: 'basic', label: 'basic', monthlyPrice: 60_000, visits: 20, gymAccess: 'standard' }];
+  const svc = createSubscriptionService({
+    subscriptions, paymentRequests, checkins: memStore(), gyms: [],
+    settingsService: settingsWithTiers(tiers), publicUserId: async () => 'FF-1',
+    promoteStarted: (subs, now) => promoteStartedSubscriptions(subscriptions, subs, { now }),
+    now: () => +REAL_NOW,
+  });
+  const me = await svc.me({ id: 'm1', userType: 'member' });
+  assert.equal(me.subscription.id, 'sub_pass');
+  assert.equal(me.subscription.status, 'active');
+  assert.equal(me.visitCap, 20, 'visits are counted against the running pass');
+  assert.equal(me.entitlements.fitflexPass.id, 'sub_pass');
+  assert.deepEqual(me.scheduledRenewals.map((r) => r.id), ['sub_sched']);
+  assert.equal(me.pendingPayment.id, 'pay_old', 'the open request is still reported; it no longer decides the pass state');
+});
