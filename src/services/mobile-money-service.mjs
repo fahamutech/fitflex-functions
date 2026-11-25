@@ -79,6 +79,16 @@ export const accountTail = (account) => `…${String(account ?? '').replace(/[^0
 /** At most this many given-up transaction ids are remembered per request (the newest). */
 const SUPERSEDED_MAX = 10;
 
+/**
+ * AzamPay's sandbox calls back BEFORE its own checkout call has answered (seen 2026-11-25: the success arrived ~3 s
+ * before the transaction id did). An UNSIGNED callback cannot be matched then, so it is kept here (per process) for a
+ * short while and acted on only once the checkout answer names the same transaction. Bounded so forged callbacks
+ * cannot grow it.
+ */
+const EARLY_CALLBACK_TTL_MS = 5 * 60_000;
+const EARLY_CALLBACKS_PER_REQUEST = 5;
+const EARLY_CALLBACK_REQUESTS_MAX = 200;
+
 /** Our reference for one attempt: "<request id>.<attempt>" (unique per prompt). */
 const referenceFor = (requestId, now) => `${requestId}.${now.toString(36)}`;
 /** The request id inside a reference: a checkout-page reference (30 characters), "<request id>.<attempt>", or the id itself. */
@@ -228,6 +238,35 @@ export function createMobileMoneyService({
   }
 
   const isPlaceholder = isClaimPlaceholder;
+
+  // Unsigned callbacks that came before their checkout answer: requestId → [{ payload, ids, at }].
+  const earlyCallbacks = new Map();
+  function pruneEarly() {
+    const cutoff = now() - EARLY_CALLBACK_TTL_MS;
+    for (const [id, list] of earlyCallbacks) {
+      const kept = list.filter((e) => e.at > cutoff);
+      if (kept.length) earlyCallbacks.set(id, kept); else earlyCallbacks.delete(id);
+    }
+  }
+  function parkEarly(requestId, payload, ids) {
+    pruneEarly();
+    const list = earlyCallbacks.get(requestId) ?? [];
+    if (list.length >= EARLY_CALLBACKS_PER_REQUEST) return false;
+    if (!earlyCallbacks.has(requestId) && earlyCallbacks.size >= EARLY_CALLBACK_REQUESTS_MAX) return false;
+    list.push({ payload, ids: [...ids], at: now() });
+    earlyCallbacks.set(requestId, list);
+    return true;
+  }
+  /** The kept callback that names this transaction, removed from the store; else null. */
+  function takeEarly(requestId, transactionId) {
+    pruneEarly();
+    const list = earlyCallbacks.get(requestId);
+    const i = list ? list.findIndex((e) => e.ids.includes(transactionId)) : -1;
+    if (i < 0) return null;
+    const [hit] = list.splice(i, 1);
+    if (!list.length) earlyCallbacks.delete(requestId);
+    return hit;
+  }
   /** A prompt is out and recent, or a call to send one is under way and recent. */
   const inFlight = (r) => r?.provider === PROVIDER && mobileMoneyInFlight(r, now());
 
@@ -447,6 +486,19 @@ export function createMobileMoneyService({
       if (request.eventOrderId) {
         try { await eventOrders.afterPrompt(request, transactionId, { page: method === PAYMENT_METHODS.PAGE }); } catch (err) { await audit('payment_mobile_money_unrecorded', request.id, null, { transactionId, error: String(err?.message || err) }); }
       }
+      // An unsigned (sandbox) callback that arrived before this answer: now that the transaction is on record,
+      // it goes through the normal unsigned checks (open attempt, this transaction, exact amount).
+      const early = takeEarly(request.id, transactionId);
+      if (early) {
+        const out = await handleCallback(early.payload, { signed: false });
+        console.info('[azampay] early_callback', JSON.stringify({
+          paymentRequestId: request.id, transactionId, outcome: out.error ?? out.state ?? out.ignored ?? 'ok', ...(out.reason ? { reason: out.reason } : {}),
+        }));
+        if (out.state === 'completed') {
+          const latest = (await paymentRequests.findByIdAsync(request.id)) ?? updated;
+          return { status: 200, state: 'completed', paymentRequest: view(latest), method };
+        }
+      }
       return { status: 202, state: 'in_progress', paymentRequest: view(updated), method, ...(checkoutUrl ? { checkoutUrl } : {}) };
     } catch (err) {
       // The prompt is out but we could not record it: keep the claim; the callback settles it.
@@ -640,6 +692,13 @@ export function createMobileMoneyService({
       const matches = Boolean(request) && request.status === 'pending' && inFlight(request)
         && !isPlaceholder(request.reference) && ids.includes(request.reference);
       if (!matches) {
+        // The checkout call for this request is still under way (its claim is on record, not yet a transaction id):
+        // keep the callback until the answer names a transaction, then check it then. Nothing changes now.
+        const waiting = Boolean(request) && request.status === 'pending' && inFlight(request) && isPlaceholder(request.reference);
+        if (waiting && ids.length && parkEarly(request.id, payload, ids)) {
+          await audit('payment_mobile_money_unsigned_parked', request.id, null, { transactionIds: ids });
+          return { status: 200, ok: true, state: 'parked' };
+        }
         if (request) await audit('payment_mobile_money_unsigned_refused', request.id, null, { transactionIds: ids, recorded: request.reference ?? null, status: request.status });
         return fail('unsigned_unmatched', 403);
       }
