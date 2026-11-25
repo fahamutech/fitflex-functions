@@ -45,6 +45,7 @@ import {
 } from '../integrations/payments/azampay.mjs';
 import { productTypeOfPayment, PRODUCT_TYPES } from '../shared/payment-product.mjs';
 import { updateIf } from '../shared/conditional-update.mjs';
+import { upgradeApprovable } from '../shared/pass-upgrade.mjs';
 import {
   MOBILE_MONEY_PROVIDER, CLAIM_PLACEHOLDER, isClaimPlaceholder, mobileMoneyInFlight, pageReferenceFor, parsePageReference,
 } from '../shared/mobile-money-claim.mjs';
@@ -373,6 +374,12 @@ export function createMobileMoneyService({
     // even on a request raised before it was taken off (fail closed).
     if (product === PRODUCT_TYPES.FITFLEX_PASS && tierSellable && !tierSellable(request.tier)) {
       return fail('tier_not_available', 409, { tier: request.tier ?? null });
+    }
+    // A pass upgrade is charged only while the plan it upgrades is still the member's own, running plan: approval
+    // would be refused afterwards (upgrade_plan_not_active) and the money held for staff (seen in the sandbox 2026-11-25).
+    if (product === PRODUCT_TYPES.FITFLEX_PASS) {
+      const upgrade = await upgradeApprovable(subscriptions, request, new Date(now()));
+      if (!upgrade.ok) return fail(upgrade.error, 409);
     }
     if (!(request.amountTzs > 0)) return fail('invalid_amount', 409);
     // B1 security review: a rejected session whose slot was booked by someone else since
