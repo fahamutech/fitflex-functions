@@ -577,6 +577,9 @@ test('list: newest first, status filter, limit and cursor; bad parameters → 40
   const v = await vendor();
   const ids = [];
   for (let i = 0; i < 3; i += 1) ids.push(must(await upload(as(v), 'products', productsCsv(1, { prefix: `L${i}` })), 201).batch.id);
+  // Uploads can land in the same millisecond, and same-ms batches tie-break on their random id: space them a second apart.
+  const base = Date.now();
+  for (const [i, id] of ids.entries()) await db('VendorImportBatch').where({ id }).update({ createdAt: new Date(base - (ids.length - i) * 1000) });
   const page1 = must(await call(vendorImportList, as(v), { query: { limit: '2' } }));
   assert.deepEqual(page1.batches.map(b => b.id), [ids[2], ids[1]]);
   assert.ok(page1.nextCursor);
@@ -910,20 +913,24 @@ test('M3 the per-server place queue: a wait that times out answers 503 import_bu
   const hold = new Promise(resolve => { free = resolve; });
   // vendor a occupies the only place
   const occupying = store.withVendorLock(a, async () => { await hold; });
-  await new Promise(r => setTimeout(r, 50));
-  const timedOut = await service.apply({ vendorId: b, actorId: b, id: upB.id, body: {}, costAllowed: true });
-  assert.deepEqual([timedOut.status, timedOut.error, timedOut.retryAfterSeconds], [503, 'import_busy', 5]);
-  assert.deepEqual([(await batchRow(upB.id)).status, (await batchRow(upB.id)).claimToken], ['ready', null], 'claim given back');
-  // an aborted waiter leaves the queue at once (no waiting for the timeout) and is not served later
-  const controller = new AbortController();
-  const waiting = service.apply({ vendorId: b, actorId: b, id: upB2.id, body: {}, costAllowed: true, signal: controller.signal });
-  setTimeout(() => controller.abort(), 30);
-  const t0 = Date.now();
-  const aborted = await waiting;
-  assert.deepEqual([aborted.error, aborted.status], ['request_aborted', 499]);
-  assert.ok(Date.now() - t0 < 140, 'left the queue when the client left');
-  free();
-  await occupying;
+  // Free the place even when an assertion fails: the held transaction would otherwise keep the spec process alive forever.
+  try {
+    await new Promise(r => setTimeout(r, 50));
+    const timedOut = await service.apply({ vendorId: b, actorId: b, id: upB.id, body: {}, costAllowed: true });
+    assert.deepEqual([timedOut.status, timedOut.error, timedOut.retryAfterSeconds], [503, 'import_busy', 5]);
+    assert.deepEqual([(await batchRow(upB.id)).status, (await batchRow(upB.id)).claimToken], ['ready', null], 'claim given back');
+    // an aborted waiter leaves the queue at once (no waiting for the timeout) and is not served later
+    const controller = new AbortController();
+    const waiting = service.apply({ vendorId: b, actorId: b, id: upB2.id, body: {}, costAllowed: true, signal: controller.signal });
+    setTimeout(() => controller.abort(), 30);
+    const t0 = Date.now();
+    const aborted = await waiting;
+    assert.deepEqual([aborted.error, aborted.status], ['request_aborted', 499]);
+    assert.ok(Date.now() - t0 < 140, 'left the queue when the client left');
+  } finally {
+    free();
+    await occupying;
+  }
   assert.equal((await productsOf(b)).length, 0, 'nothing ran for the waiters');
   // the place is free again and a normal apply works
   const ok = await service.apply({ vendorId: b, actorId: b, id: upB.id, body: {}, costAllowed: true });
